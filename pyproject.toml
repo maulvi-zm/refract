@@ -1,0 +1,36 @@
+[project]
+name = "refract"
+version = "0.1.0"
+description = "Multi-language CLI that detects code smells with tree-sitter and proposes LLM-based refactors"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "tree-sitter>=0.25.2",
+    "tree-sitter-java>=0.23.5",
+    "tree-sitter-python>=0.25.0",
+]
+
+[project.scripts]
+refract = "refract.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# PEP 420 namespace package: no __init__.py files. Hatchling includes the
+# package directory by path, so the absence of __init__.py is intentional.
+[tool.hatch.build.targets.wheel]
+packages = ["src/refract"]
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+
+[tool.ruff.format]
+docstring-code-format = true

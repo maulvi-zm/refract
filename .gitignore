@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling
+.ruff_cache/
+.pytest_cache/
+
+# Local data
+*.db
+.env
