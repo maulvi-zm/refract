@@ -40,8 +40,8 @@ def extract_methods(path: Path, spec: LanguageSpec) -> list[MethodInfo]:
                 name=node_text(name_node, source),
                 class_name=_enclosing_class(definition, source, spec),
                 file=path,
-                start_line=name_node.start_point[0],
-                end_line=body_node.end_point[0],
+                start_line=name_node.start_point[0] + 1,  # rows are 0-based
+                end_line=body_node.end_point[0] + 1,
                 cyclomatic_complexity=_cyclomatic_complexity(body_node, source, spec),
                 parameters=parameters,
                 calls=calls,
