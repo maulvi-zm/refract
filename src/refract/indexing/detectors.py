@@ -98,6 +98,8 @@ def _magic_numbers(
 
         if _normalize_number(literal) in spec.ignored_numbers:
             continue
+        if spec.is_constant_definition(node, source):
+            continue
 
         smells.append(
             SmellLocation(
