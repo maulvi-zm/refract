@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import defaultdict
 from pathlib import Path
 
 from refract.core.models import MethodInfo, RepositoryIndex, SmellLocation, SmellType
@@ -94,33 +95,23 @@ def load(db_path: Path) -> RepositoryIndex:
     conn.row_factory = sqlite3.Row
 
     try:
-        methods = []
-        for row in conn.execute("SELECT * FROM methods ORDER BY id"):
-            calls = [
-                r["callee"]
-                for r in conn.execute(
-                    "SELECT callee FROM method_calls WHERE method_id = ?", (row["id"],)
-                )
-            ]
-            parameters = [
-                r["parameter"]
-                for r in conn.execute(
-                    "SELECT parameter FROM method_parameters WHERE method_id = ?",
-                    (row["id"],),
-                )
-            ]
-            methods.append(
-                MethodInfo(
-                    name=row["name"],
-                    class_name=row["class_name"],
-                    file=Path(row["file"]),
-                    start_line=row["start_line"],
-                    end_line=row["end_line"],
-                    cyclomatic_complexity=row["cyclomatic_complexity"],
-                    calls=calls,
-                    parameters=parameters,
-                )
+        calls = _grouped(conn, "method_calls", "callee")
+        parameters = _grouped(conn, "method_parameters", "parameter")
+
+        # insertion order matters for name resolution
+        methods = [
+            MethodInfo(
+                name=row["name"],
+                class_name=row["class_name"],
+                file=Path(row["file"]),
+                start_line=row["start_line"],
+                end_line=row["end_line"],
+                cyclomatic_complexity=row["cyclomatic_complexity"],
+                calls=calls.get(row["id"], []),
+                parameters=parameters.get(row["id"], []),
             )
+            for row in conn.execute("SELECT * FROM methods ORDER BY id")
+        ]
         smells = [
             SmellLocation(
                 smell=SmellType(row["smell"]),
@@ -136,3 +127,9 @@ def load(db_path: Path) -> RepositoryIndex:
 
     return RepositoryIndex(methods=methods, smells=smells)
 
+
+def _grouped(conn: sqlite3.Connection, table: str, column: str) -> dict[int, list[str]]:
+    grouped: dict[int, list[str]] = defaultdict(list)
+    for row in conn.execute(f"SELECT method_id, {column} FROM {table}"):
+        grouped[row["method_id"]].append(row[column])
+    return grouped
