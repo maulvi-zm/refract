@@ -62,7 +62,8 @@ def build_context(index: RepositoryIndex, smell: SmellLocation) -> RefactorConte
 def _containing_method(methods: list[MethodInfo], smell: SmellLocation) -> MethodInfo | None:
     containing = [m for m in methods if m.start_line <= smell.line <= m.end_line]
     if containing:
-        return containing[0]
+        # innermost method for nested definitions
+        return min(containing, key=lambda m: m.end_line - m.start_line)
 
     by_identifier = [m for m in methods if m.name == smell.identifier]
     return by_identifier[0] if by_identifier else None
