@@ -12,6 +12,8 @@ from refract.languages.registry import spec_for_path
 _EXCLUDE = re.compile(
     "|".join(
         (
+            r"/src/test/",
+            r"/src/it/",
             r"/xdocs-examples/",
             r"/resources/",
             r"noncompilable",
