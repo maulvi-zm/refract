@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./docs/images/refraction.jpg" alt="refraction-image" width="800">
+</p>
+
 # refract
 
 Multi-language CLI that detects code smells with [tree-sitter](https://tree-sitter.github.io/)
