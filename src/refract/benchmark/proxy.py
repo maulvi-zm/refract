@@ -5,12 +5,13 @@ import json
 import socketserver
 import threading
 from urllib import request as urllib_request
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 
 class ProxyStats:
     def __init__(self) -> None:
         self.api_calls = 0
+        self.failed_calls = 0
         self.input_tokens = 0
         self.output_tokens = 0
         self._lock = threading.Lock()
@@ -19,14 +20,28 @@ class ProxyStats:
         with self._lock:
             self.api_calls += 1
             text = body.decode("utf-8", errors="replace")
-            if "event-stream" in content_type:
-                self._record_stream(text)
-            else:
-                self._record_json(text)
+            usage = (
+                self._stream_usage(text)
+                if "event-stream" in content_type
+                else self._json_usage(text)
+            )
+            self.input_tokens += self._input(usage)
+            self.output_tokens += self._output(usage)
 
-    def _record_stream(self, text: str) -> None:
-        # SSE stream: hunt the data lines for a usage object. Chat Completions
-        # keeps it on the chunk, the Responses API tucks it under chunk.response.
+    def record_failure(self) -> None:
+        """Count an upstream call that errored (5xx/429/connection). Without
+        this, failed calls vanish from api_calls -- undercounting exactly when
+        the run is struggling. No tokens: an error body carries no usage."""
+        with self._lock:
+            self.api_calls += 1
+            self.failed_calls += 1
+
+    def _stream_usage(self, text: str) -> dict:
+        # SSE stream: keep the last usage object seen. OpenAI emits it once on the
+        # final chunk; Gemini repeats it cumulatively on every chunk, so last wins
+        # for both. Chat Completions puts it on the chunk, the Responses API tucks
+        # it under chunk.response, and Gemini uses chunk.usageMetadata.
+        last: dict = {}
         for line in text.splitlines():
             if not line.startswith("data:"):
                 continue
@@ -37,19 +52,65 @@ class ProxyStats:
                 chunk = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            usage = chunk.get("usage") or (chunk.get("response") or {}).get("usage") or {}
-            self._add_usage(usage)
+            usage = self._extract(chunk)
+            if usage:
+                last = usage
+        return last
 
-    def _record_json(self, text: str) -> None:
+    def _json_usage(self, text: str) -> dict:
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
-            return
-        self._add_usage(data.get("usage") or {})
+            return {}
+        if isinstance(data, list):
+            # Gemini's streamGenerateContent (without ?alt=sse) returns a JSON
+            # array of chunks rather than an SSE stream; keep the last usage.
+            last: dict = {}
+            for chunk in data:
+                usage = self._extract(chunk)
+                if usage:
+                    last = usage
+            return last
+        return self._extract(data)
 
-    def _add_usage(self, usage: dict) -> None:
-        self.input_tokens += usage.get("input_tokens", usage.get("prompt_tokens", 0))
-        self.output_tokens += usage.get("output_tokens", usage.get("completion_tokens", 0))
+    @staticmethod
+    def _extract(obj: object) -> dict:
+        if not isinstance(obj, dict):
+            return {}
+        return (
+            obj.get("usage")
+            or (obj.get("response") or {}).get("usage")
+            or obj.get("usageMetadata")
+            or {}
+        )
+
+    @staticmethod
+    def _input(usage: dict) -> int:
+        return usage.get(
+            "input_tokens", usage.get("prompt_tokens", usage.get("promptTokenCount", 0))
+        )
+
+    @staticmethod
+    def _output(usage: dict) -> int:
+        # Direct output count across OpenAI (output_tokens / completion_tokens)
+        # and Gemini (candidatesTokenCount). Gemini 2.5 "thinking" models bill
+        # reasoning as output but report it separately under thoughtsTokenCount,
+        # so add it in -- otherwise a run that spends most of its budget
+        # thinking looks nearly free.
+        direct = (
+            usage.get("output_tokens")
+            or usage.get("completion_tokens")
+            or usage.get("candidatesTokenCount")
+            or 0
+        )
+        direct += usage.get("thoughtsTokenCount", 0)
+        if direct:
+            return direct
+        # Fallback: some Gemini streaming responses leave candidatesTokenCount
+        # off the final usageMetadata, carrying only prompt+total -- derive
+        # output as total-minus-input so it never silently reads zero.
+        total = usage.get("total_tokens") or usage.get("totalTokenCount") or 0
+        return max(0, total - ProxyStats._input(usage)) if total else 0
 
 
 class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -99,7 +160,17 @@ def _make_handler(stats: ProxyStats, upstream: str) -> type:
 
                     stats.record(resp_body, content_type)
             except HTTPError as exc:
+                # 4xx/5xx from upstream: still a call the tool made -- count it,
+                # then relay the error body so the tool sees the real status.
+                stats.record_failure()
                 self._respond(exc.code, "application/json", exc.read())
+            except URLError as exc:
+                # Connection reset / DNS / timeout: never reached upstream, but
+                # it's still an attempt. Count it and surface a 502 rather than
+                # letting the handler thread crash and hang the tool's request.
+                stats.record_failure()
+                body = json.dumps({"error": {"message": str(exc.reason)}}).encode("utf-8")
+                self._respond(502, "application/json", body)
 
         def _respond(self, status: int, content_type: str, body: bytes) -> None:
             self.send_response(status)
