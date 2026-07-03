@@ -51,7 +51,13 @@ def _detect_java_command(repo_root: Path) -> list[str] | None:
 def _detect_python_command(repo_root: Path) -> list[str] | None:
     if not _has_python_tests(repo_root):
         return None
-    # prefer pytest, fall back to the stdlib runner
+    # a repo-local venv (its own dependencies installed) beats whatever pytest
+    # happens to be on PATH -- otherwise this repo's tests fail on
+    # ModuleNotFoundError for its own package before a single line of the
+    # actual refactor is evaluated.
+    venv_pytest = repo_root / ".venv" / "bin" / "pytest"
+    if venv_pytest.exists():
+        return [str(venv_pytest)]
     if shutil.which("pytest"):
         return ["pytest"]
     return [sys.executable, "-m", "unittest", "discover"]
