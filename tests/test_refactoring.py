@@ -8,18 +8,43 @@ from refract.refactoring.pipeline import run_refactor
 from refract.refactoring.proposal import (
     ProviderName,
     RefactorProposal,
+    SnippetEdit,
     validate_replacement,
 )
 from refract.refactoring.providers import config_from_env
 
 
 def _proposal(old: str, new: str) -> RefactorProposal:
-    return RefactorProposal(explanation="x", old_snippet=old, new_snippet=new, confidence=0.9)
+    return RefactorProposal(explanation="x", edits=(SnippetEdit(old, new),), confidence=0.9)
 
 
 def test_proposal_from_json_rejects_missing_fields() -> None:
     with pytest.raises(ValueError):
         RefactorProposal.from_json({"explanation": "x", "old_snippet": "a"})
+
+
+def test_proposal_from_json_parses_multi_edit_list() -> None:
+    proposal = RefactorProposal.from_json(
+        {
+            "explanation": "extract constant",
+            "edits": [
+                {"old_snippet": "MAX = 0", "new_snippet": "MAX = 10  # limit"},
+                {"old_snippet": "x > 10", "new_snippet": "x > MAX"},
+            ],
+            "confidence": 0.8,
+        }
+    )
+    assert len(proposal.edits) == 2
+    # convenience accessors point at the first edit
+    assert proposal.old_snippet == "MAX = 0"
+    assert proposal.new_snippet == "MAX = 10  # limit"
+
+
+def test_proposal_from_json_accepts_legacy_single_snippet() -> None:
+    proposal = RefactorProposal.from_json(
+        {"explanation": "x", "old_snippet": "a", "new_snippet": "b", "confidence": 0.5}
+    )
+    assert proposal.edits == (SnippetEdit("a", "b"),)
 
 
 def test_proposal_from_json_rejects_out_of_range_confidence() -> None:
@@ -50,6 +75,39 @@ def test_patcher_dry_run_does_not_write(tmp_path: Path) -> None:
     assert "int count = 1;" in updated
     # dry run, so the file on disk is untouched
     assert "int a = 1;" in source.read_text(encoding="utf-8")
+
+
+def test_patcher_applies_multiple_edits_in_one_file(tmp_path: Path) -> None:
+    source = tmp_path / "example.py"
+    source.write_text("LIMIT = 0\n\n\ndef check(x):\n    return x > 10\n", encoding="utf-8")
+
+    proposal = RefactorProposal(
+        explanation="extract constant",
+        edits=(
+            SnippetEdit("LIMIT = 0", "LIMIT = 10"),
+            SnippetEdit("return x > 10", "return x > LIMIT"),
+        ),
+        confidence=0.9,
+    )
+    apply_snippet_replacement(source, proposal, apply=True)
+
+    text = source.read_text(encoding="utf-8")
+    assert "LIMIT = 10" in text
+    assert "return x > LIMIT" in text
+
+
+def test_patcher_rejects_edit_that_breaks_syntax(tmp_path: Path) -> None:
+    source = tmp_path / "example.py"
+    original = "def f():\n    return 1\n"
+    source.write_text(original, encoding="utf-8")
+
+    # an unbalanced paren makes the file unparseable -- the guardrail must refuse
+    broken = _proposal("return 1", "return (1")
+
+    with pytest.raises(ValueError):
+        apply_snippet_replacement(source, broken, apply=True)
+    # do no harm: the file on disk is untouched
+    assert source.read_text(encoding="utf-8") == original
 
 
 def test_config_from_env_reads_key_and_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
