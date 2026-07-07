@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any
 from urllib import request
+from urllib.error import HTTPError
 
 from refract.refactoring.proposal import ProviderConfig, ProviderName, RefactorProposal
+
+# Transient upstream failures worth retrying: rate limiting and server-side
+# overload. A single 503 shouldn't permanently skip a target -- observed on a
+# live call where the identical request failed once then succeeded immediately
+# on retry with no changes at all, confirming it's provider-side, not us.
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_MAX_ATTEMPTS = 3
+_BACKOFF_SECONDS = 1.0
 
 DEFAULT_MODELS: dict[ProviderName, str] = {
     ProviderName.OPENAI: "gpt-4.1",
@@ -110,10 +120,8 @@ class GeminiProvider(HttpJsonProvider):
     name = ProviderName.GEMINI
 
     def _url(self) -> str:
-        return (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.config.model}:generateContent?key={self.config.api_key}"
-        )
+        base = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
+        return f"{base}/v1beta/models/{self.config.model}:generateContent?key={self.config.api_key}"
 
     def _payload(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         return {
@@ -121,7 +129,7 @@ class GeminiProvider(HttpJsonProvider):
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "responseSchema": _proposal_schema(),
+                "responseSchema": _proposal_schema_gemini(),
             },
         }
 
@@ -137,9 +145,16 @@ class GeminiProvider(HttpJsonProvider):
 
 def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
-    req = request.Request(url, data=body, headers=headers, method="POST")
-    with request.urlopen(req, timeout=60) as response:
-        return json.loads(response.read().decode("utf-8"))
+    for attempt in range(_MAX_ATTEMPTS):
+        req = request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with request.urlopen(req, timeout=60) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            if exc.code not in _RETRYABLE_STATUSES or attempt == _MAX_ATTEMPTS - 1:
+                raise
+            time.sleep(_BACKOFF_SECONDS * (2**attempt))
+    raise AssertionError("unreachable: loop always returns or raises")
 
 
 def _proposal_schema() -> dict[str, Any]:
@@ -148,9 +163,29 @@ def _proposal_schema() -> dict[str, Any]:
         "additionalProperties": False,
         "properties": {
             "explanation": {"type": "string"},
-            "old_snippet": {"type": "string"},
-            "new_snippet": {"type": "string"},
+            "edits": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "old_snippet": {"type": "string"},
+                        "new_snippet": {"type": "string"},
+                    },
+                    "required": ["old_snippet", "new_snippet"],
+                },
+            },
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         },
-        "required": ["explanation", "old_snippet", "new_snippet", "confidence"],
+        "required": ["explanation", "edits", "confidence"],
     }
+
+
+def _proposal_schema_gemini() -> dict[str, Any]:
+    # Gemini's responseSchema is a restricted OpenAPI subset that rejects
+    # unknown fields like "additionalProperties" outright (400 INVALID_ARGUMENT).
+    schema = _proposal_schema()
+    schema.pop("additionalProperties", None)
+    schema["properties"]["edits"]["items"].pop("additionalProperties", None)
+    return schema
