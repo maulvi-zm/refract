@@ -120,6 +120,94 @@ def test_config_from_env_reads_key_and_model_override(monkeypatch: pytest.Monkey
     assert config.api_key == "test-key"
 
 
+class _QueueProvider:
+    """Returns queued proposals in order (repeating the last), recording each
+    user prompt so a test can assert the repair feedback was fed back."""
+
+    name = ProviderName.OPENAI
+
+    def __init__(self, proposals: list[RefactorProposal]) -> None:
+        self._proposals = proposals
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def propose(self, system_prompt: str, user_prompt: str) -> RefactorProposal:
+        self.prompts.append(user_prompt)
+        proposal = self._proposals[min(self.calls, len(self._proposals) - 1)]
+        self.calls += 1
+        return proposal
+
+
+def _magic_index(source: Path) -> RepositoryIndex:
+    return RepositoryIndex(
+        methods=[MethodInfo("target", "<unknown>", source, 1, 3, 1)],
+        smells=[SmellLocation(SmellType.MAGIC_NUMBER, source, 2, "42", "magic")],
+    )
+
+
+def test_run_refactor_retries_with_feedback_then_applies(tmp_path: Path) -> None:
+    source = tmp_path / "mod.py"
+    source.write_text("def target():\n    value = 42\n    return value\n", encoding="utf-8")
+
+    rejected = _proposal("value = 999", "value = LIMIT")  # 999 not in source -> rejected
+    valid = _proposal("value = 42", "value = LIMIT")
+    provider = _QueueProvider([rejected, valid])
+
+    results = run_refactor(
+        _magic_index(source), tmp_path, SmellType.MAGIC_NUMBER, 1, provider, True
+    )
+
+    assert provider.calls == 2  # first rejected, retried once
+    assert len(results) == 1
+    assert results[0].attempts == 2
+    assert "value = LIMIT" in source.read_text(encoding="utf-8")
+    # the retry prompt carried the rejection feedback back to the model
+    assert "REJECTED" in provider.prompts[1]
+    assert "not found" in provider.prompts[1].lower()
+
+
+def test_run_refactor_gives_up_after_max_attempts_leaving_file_intact(tmp_path: Path) -> None:
+    source = tmp_path / "mod.py"
+    original = "def target():\n    value = 42\n    return value\n"
+    source.write_text(original, encoding="utf-8")
+
+    # unbalanced paren: every attempt leaves the file unparseable, so all are rejected
+    always_bad = _proposal("value = 42", "value = (42")
+    provider = _QueueProvider([always_bad])
+
+    results = run_refactor(
+        _magic_index(source), tmp_path, SmellType.MAGIC_NUMBER, 1, provider, True, max_attempts=3
+    )
+
+    assert provider.calls == 3  # exhausted the budget
+    assert results == []  # target skipped
+    assert source.read_text(encoding="utf-8") == original  # do no harm: untouched
+
+
+def test_max_attempts_one_disables_retry(tmp_path: Path) -> None:
+    source = tmp_path / "mod.py"
+    source.write_text("def target():\n    value = 42\n    return value\n", encoding="utf-8")
+
+    provider = _QueueProvider([_proposal("value = 999", "value = LIMIT")])
+
+    results = run_refactor(
+        _magic_index(source), tmp_path, SmellType.MAGIC_NUMBER, 1, provider, True, max_attempts=1
+    )
+
+    assert provider.calls == 1  # single-shot: no retry
+    assert results == []
+
+
+def test_build_repair_prompt_includes_error_and_failed_edit() -> None:
+    from refract.refactoring.prompt import build_repair_prompt
+
+    text = build_repair_prompt("BASE CONTEXT", _proposal("missing_snippet", "replacement"), "boom")
+
+    assert "BASE CONTEXT" in text
+    assert "boom" in text
+    assert "missing_snippet" in text  # the rejected edit is shown back
+
+
 def test_pipeline_dry_run_uses_provider_without_writing(tmp_path: Path) -> None:
     source = tmp_path / "example.py"
     source.write_text("def target():\n    value = 42\n    return value\n", encoding="utf-8")

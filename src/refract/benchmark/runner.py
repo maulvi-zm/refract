@@ -153,6 +153,7 @@ def run_benchmark(
     done_tools: set[str] | None = None,
     on_result: Callable[[ToolResult], None] | None = None,
     workdir: Path | None = None,
+    refract_max_attempts: int = 3,
 ) -> list[ToolResult]:
     """Run refract plus each requested agentic tool on its own copy of the repo.
 
@@ -189,6 +190,13 @@ def run_benchmark(
     of a self-deleting temp dir, so the actual patched code + per-target diffs
     survive the run and each edit is auditable (roadmap #6). None keeps the old
     behavior: an auto-cleaned tempfile.TemporaryDirectory.
+
+    refract_max_attempts caps how many inference calls refract may spend per
+    target: the first proposal plus feedback-driven retries when an edit is
+    rejected (bad snippet, ambiguous match, unparseable patch). 1 disables
+    retries, recovering the original single-shot behavior for a no-retry arm.
+    Retry calls are counted like any other through the proxy, so their cost is
+    already reflected in api_calls/tokens.
     """
     done = done_tools or set()
     selected = tools if tools is not None else ["codex"]
@@ -237,6 +245,7 @@ def run_benchmark(
                 smells_before,
                 baseline,
                 refract_provider,
+                refract_max_attempts,
             )
             _attach_oracle(refract_result, refract_dir, smell_type, oracle_before)
             if on_result is not None:
@@ -535,6 +544,7 @@ def _run_refract(
     smells_before: int,
     baseline: Baseline,
     provider_name: str = "openai",
+    max_attempts: int = 3,
 ) -> ToolResult:
     # point refract at the proxy, which forwards to the real upstream so calls
     # get counted regardless of which provider is backing this run
@@ -568,6 +578,7 @@ def _run_refract(
             limit=limit,
             provider=provider,
             apply=True,
+            max_attempts=max_attempts,
         )
     except Exception as exc:  # noqa: BLE001 - report any failure in the result
         error = str(exc)

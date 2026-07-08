@@ -47,6 +47,14 @@ def _build_parser() -> argparse.ArgumentParser:
     refactor_parser.add_argument("--model")
     refactor_parser.add_argument("--smell", choices=_SMELL_CHOICES, required=True)
     refactor_parser.add_argument("--limit", type=int, default=10)
+    refactor_parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="Inference calls per target: the first proposal plus feedback-driven "
+        "retries when an edit is rejected (bad snippet, ambiguous match, "
+        "unparseable patch). 1 disables retries. Default: 3.",
+    )
     action = refactor_parser.add_mutually_exclusive_group()
     action.add_argument("--dry-run", action="store_true", default=True)
     action.add_argument("--apply", action="store_true")
@@ -121,6 +129,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "of a self-deleting temp dir, so the actual edits and diffs are auditable "
         "after the run (refract_copy/, <tool>_copy/).",
     )
+    bench_parser.add_argument(
+        "--refract-max-attempts",
+        type=int,
+        default=3,
+        help="Inference calls refract may spend per target: the first proposal "
+        "plus feedback-driven retries when an edit is rejected. 1 disables retries "
+        "(single-shot arm). Default: 3.",
+    )
     bench_parser.set_defaults(func=_cmd_benchmark)
 
     return parser
@@ -153,6 +169,7 @@ def _cmd_refactor(args: argparse.Namespace) -> None:
         limit=args.limit,
         provider=provider,
         apply=args.apply,
+        max_attempts=args.max_attempts,
     )
 
     mode = "applied" if args.apply else "planned"
@@ -276,6 +293,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> None:
         test_command=args.test_command,
         verbose=args.verbose,
         workdir=args.keep_workdir.resolve() if args.keep_workdir else None,
+        refract_max_attempts=args.refract_max_attempts,
     )
     print_report(results)
     if args.keep_workdir:

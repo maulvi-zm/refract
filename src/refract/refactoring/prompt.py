@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from refract.planning.context import RefactorContext
+from refract.refactoring.proposal import RefactorProposal
 
 
 def build_system_prompt(language: str) -> str:
@@ -67,6 +68,38 @@ def _method_summary(context: RefactorContext) -> str:
         f"lines {method.start_line}-{method.end_line}, "
         f"CC {method.cyclomatic_complexity}, "
         f"parameters {method.parameters}, calls {method.calls}."
+    )
+
+
+def build_repair_prompt(base_user_prompt: str, proposal: RefactorProposal, error: str) -> str:
+    """Re-ask the model after its previous proposal was rejected and NOT applied.
+
+    Carries the full original context plus the concrete rejection reason and the
+    exact edits that failed, so the model can correct the specific mistake (a
+    snippet that isn't verbatim, an ambiguous match, or a patch that doesn't
+    parse) rather than guessing. The file is untouched -- a rejected attempt
+    never writes -- so the corrected edits still apply against the same source.
+    """
+    edits_desc = "\n".join(
+        f"  edit {i}:\n    old_snippet: {edit.old_snippet!r}\n    new_snippet: {edit.new_snippet!r}"
+        for i, edit in enumerate(proposal.edits, start=1)
+    )
+    return "\n".join(
+        [
+            base_user_prompt,
+            "",
+            "Your previous proposal was REJECTED and NOT applied. Correct it and "
+            "return a new proposal.",
+            f"Rejection reason: {error}",
+            "The edits you proposed were:",
+            edits_desc,
+            "",
+            "Likely causes: an old_snippet that is not present verbatim in the source "
+            "above (match whitespace and indentation exactly); an old_snippet that "
+            "occurs more than once (extend it until it matches exactly one location); "
+            "or edits that together leave the file unparseable. Return edits that "
+            "apply cleanly and preserve behavior.",
+        ]
     )
 
 

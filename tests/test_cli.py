@@ -20,6 +20,7 @@ def _args(**overrides) -> argparse.Namespace:
         refract_provider="openai",
         test_command="auto",
         keep_workdir=None,
+        refract_max_attempts=3,
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
