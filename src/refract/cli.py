@@ -62,17 +62,64 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="Report local setup readiness")
     doctor_parser.set_defaults(func=_cmd_doctor)
 
-    bench_parser = subparsers.add_parser("benchmark", help="Compare refract vs Codex CLI")
+    check_parser = subparsers.add_parser(
+        "check", help="Report remaining smells of one type (exit 1 if any remain)"
+    )
+    check_parser.add_argument("repo", type=Path)
+    check_parser.add_argument("--smell", choices=_SMELL_CHOICES, required=True)
+    check_parser.set_defaults(func=_cmd_check)
+
+    bench_parser = subparsers.add_parser(
+        "benchmark", help="Compare refract vs agentic CLIs (codex, opencode, gemini)"
+    )
     bench_parser.add_argument("repo", type=Path)
     bench_parser.add_argument("--smell", choices=_SMELL_CHOICES, required=True)
     bench_parser.add_argument("--model", default="gpt-4o-mini")
     bench_parser.add_argument("--limit", type=int, default=10)
     bench_parser.add_argument("--verbose", action="store_true")
     bench_parser.add_argument(
+        "--tools",
+        default="codex",
+        help="Comma-separated agentic tools to run against refract "
+        "(codex, opencode, gemini). Default: codex.",
+    )
+    bench_parser.add_argument(
+        "--gemini-model",
+        default="gemini-2.5-flash",
+        help="Model for the gemini tool (Gemini talks to Google, not OpenAI).",
+    )
+    bench_parser.add_argument(
         "--codex-api-key-mode",
         action="store_true",
         help="Route codex through the counting proxy using OPENAI_API_KEY "
         "(requires a verified OpenAI organization).",
+    )
+    bench_parser.add_argument(
+        "--refract-provider",
+        choices=["openai", "gemini"],
+        default="openai",
+        help="Provider backing refract's own baseline run. 'gemini' interprets "
+        "--model/the provider key as Gemini instead of OpenAI, so the whole "
+        "run can go through a single Gemini key (see "
+        "references/gemini-provider-setup.md for the full same-model setup "
+        "across all four tools). Default: openai.",
+    )
+    bench_parser.add_argument(
+        "--test-command",
+        default="auto",
+        help="Override how each tool's after-state is test-verified, same syntax "
+        "as `refract verify --test-command`. 'auto' (default) detects "
+        "mvn/gradle/pytest; pass an explicit command for repos that need one "
+        "(e.g. a multi-module Maven project where the generic `mvn test` also "
+        "builds unrelated submodules).",
+    )
+    bench_parser.add_argument(
+        "--keep-workdir",
+        type=Path,
+        default=None,
+        help="Persist each tool's patched repo copy under this directory instead "
+        "of a self-deleting temp dir, so the actual edits and diffs are auditable "
+        "after the run (refract_copy/, <tool>_copy/).",
     )
     bench_parser.set_defaults(func=_cmd_benchmark)
 
@@ -116,10 +163,14 @@ def _cmd_refactor(args: argparse.Namespace) -> None:
         print(f"\n{smell.file}:{smell.line} {smell.smell.value}")
         print(result.proposal.explanation)
         if not args.apply:
-            print("\n--- old snippet ---")
-            print(result.proposal.old_snippet)
-            print("--- new snippet ---")
-            print(result.proposal.new_snippet)
+            for i, edit in enumerate(result.proposal.edits, start=1):
+                label = (
+                    f" ({i}/{len(result.proposal.edits)})" if len(result.proposal.edits) > 1 else ""
+                )
+                print(f"\n--- old snippet{label} ---")
+                print(edit.old_snippet)
+                print(f"--- new snippet{label} ---")
+                print(edit.new_snippet)
 
     if args.apply and results:
         updated = index_repository(repo)
@@ -166,26 +217,69 @@ def _cmd_doctor(_: argparse.Namespace) -> None:
         print(f"- {provider.value}: {state} (default model {DEFAULT_MODELS[provider]})")
 
 
+def _cmd_check(args: argparse.Namespace) -> None:
+    """Fresh re-index + count for one smell type. Exits 1 while any remain.
+
+    This is the ground-truth oracle the benchmark hands to the agentic tools:
+    they run it in their own loop and iterate until it reports 0.
+    """
+    repo = args.repo.resolve()
+    index = index_repository(repo)
+    smells = index.smells_by_type(SmellType(args.smell))
+
+    print(f"{len(smells)} '{args.smell}' smell(s) remaining.")
+    for smell in smells:
+        try:
+            location = smell.file.resolve().relative_to(repo)
+        except ValueError:
+            location = smell.file
+        print(f"  {location}:{smell.line} - {smell.detail}")
+
+    if smells:
+        raise SystemExit(1)
+
+
 def _cmd_benchmark(args: argparse.Namespace) -> None:
-    api_key = os.getenv("OPENAI_API_KEY")
+    # refract's own baseline run needs whichever key matches --refract-provider;
+    # OpenAI stays the default so existing invocations behave unchanged.
+    baseline_key_env = "GEMINI_API_KEY" if args.refract_provider == "gemini" else "OPENAI_API_KEY"
+    api_key = os.getenv(baseline_key_env)
     if not api_key:
-        raise SystemExit("OPENAI_API_KEY is not set.")
+        raise SystemExit(f"{baseline_key_env} is not set.")
 
     # import here so the cli still loads without the benchmark bits
     from refract.benchmark.report import print_report
-    from refract.benchmark.runner import run_benchmark
+    from refract.benchmark.runner import AGENTIC_TOOLS, run_benchmark
 
-    print(f"Benchmarking refract vs codex on {args.repo} ({args.smell}, model={args.model})")
+    tools = [t.strip() for t in args.tools.split(",") if t.strip()]
+    unknown = [t for t in tools if t not in AGENTIC_TOOLS]
+    if unknown:
+        raise SystemExit(
+            f"Unknown --tools value(s): {', '.join(unknown)}. Choose from {', '.join(AGENTIC_TOOLS)}."
+        )
+
+    print(
+        f"Benchmarking refract ({args.refract_provider}) vs {', '.join(tools)} on {args.repo} "
+        f"({args.smell}, model={args.model})"
+    )
     results = run_benchmark(
         repo=args.repo.resolve(),
         smell_type=SmellType(args.smell),
         model=args.model,
         api_key=api_key,
         limit=args.limit,
+        tools=tools,
         codex_api_key_mode=args.codex_api_key_mode,
+        gemini_model=args.gemini_model,
+        gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+        refract_provider=args.refract_provider,
+        test_command=args.test_command,
         verbose=args.verbose,
+        workdir=args.keep_workdir.resolve() if args.keep_workdir else None,
     )
     print_report(results)
+    if args.keep_workdir:
+        print(f"\nPatched repos kept under {args.keep_workdir.resolve()}")
 
 
 def _print_smells(index: RepositoryIndex) -> None:
