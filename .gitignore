@@ -13,3 +13,6 @@ dist/
 # Local data
 *.db
 .env
+
+# Default `refract benchmark` workdir (kept patched repos + per-method metrics)
+refract-workdir/

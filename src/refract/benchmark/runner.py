@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from refract.benchmark.oracle import OracleError
@@ -60,6 +60,15 @@ class ToolResult:
     target_cc_after_median: float = 0.0
     target_cc_before_max: int = 0
     target_cc_after_max: int = 0
+    # Same distribution for lines of code per target method (physical line span).
+    # LOC is the unit the oracles threshold long_method on, and a method can lose
+    # LOC without losing CC (or vice versa), so it's tracked alongside CC rather
+    # than as a substitute. Per-method {cc,loc} records are dumped to the kept
+    # workdir (<tool>_metrics.json) for full auditability -- these are the roll-up.
+    target_loc_before_median: float = 0.0
+    target_loc_after_median: float = 0.0
+    target_loc_before_max: int = 0
+    target_loc_after_max: int = 0
     syntax_broken_files: int = 0
     tests_passed: bool | None = None  # None: no test command detected, not "passed"
     # Independent oracle (DesigniteJava/DPy) whole-repo counts, filled in only
@@ -105,6 +114,7 @@ class TargetMethod:
     name: str
     start_line: int  # tiebreaker when (file, class_name, name) still isn't unique
     complexity_before: int
+    loc_before: int  # physical line span (MethodInfo.line_count) pre-refactor
 
 
 @dataclass
@@ -435,9 +445,28 @@ def _target_methods(
                 name=method.name,
                 start_line=method.start_line,
                 complexity_before=method.cyclomatic_complexity,
+                loc_before=method.line_count,
             )
         )
     return targets
+
+
+@dataclass
+class MethodRecord:
+    """One flagged (target) method's before/after CC and LOC -- the finest
+    attributable granularity for the code-quality outcome metrics. Dumped per
+    tool to the kept workdir so any aggregate (median, max, file-sum) is
+    derivable post-hoc without re-running. cc_after/loc_after are None when the
+    method no longer exists after the refactor (renamed/removed)."""
+
+    file: str
+    class_name: str
+    method: str
+    matched: bool
+    cc_before: int
+    cc_after: int | None
+    loc_before: int
+    loc_after: int | None
 
 
 @dataclass
@@ -446,18 +475,24 @@ class ComplexityResult:
 
     file_before/file_after are summed over *all* methods in each edited file, so
     extract-method redistribution is visible (a pure move nets ~0). The target_*
-    fields describe the flagged methods' own complexity distribution -- what
+    fields describe the flagged methods' own CC and LOC distributions -- what
     matters for long_method is whether the smelly method itself dropped, not a
     sum. unmatched counts targets that no longer exist after the refactor.
+    records holds the per-method rows the distributions summarize.
     """
 
     file_before: int
     file_after: int
     unmatched: int
-    target_before_median: float
-    target_after_median: float
-    target_before_max: int
-    target_after_max: int
+    target_cc_before_median: float
+    target_cc_after_median: float
+    target_cc_before_max: int
+    target_cc_after_max: int
+    target_loc_before_median: float
+    target_loc_after_median: float
+    target_loc_before_max: int
+    target_loc_after_max: int
+    records: list[MethodRecord] = field(default_factory=list)
 
 
 def _complexity_after(
@@ -481,8 +516,11 @@ def _complexity_after(
     )
 
     before_ccs = [t.complexity_before for t in baseline.target_methods]
+    before_locs = [t.loc_before for t in baseline.target_methods]
     after_ccs: list[int] = []
+    after_locs: list[int] = []
     unmatched = 0
+    records: list[MethodRecord] = []
     for t in baseline.target_methods:
         matches = [
             m
@@ -491,18 +529,39 @@ def _complexity_after(
         ]
         if not matches:
             unmatched += 1
+            records.append(_record(t, None))
             continue
         closest = min(matches, key=lambda m: abs(m.start_line - t.start_line))
         after_ccs.append(closest.cyclomatic_complexity)
+        after_locs.append(closest.line_count)
+        records.append(_record(t, closest))
 
     return ComplexityResult(
         file_before=file_before,
         file_after=file_after,
         unmatched=unmatched,
-        target_before_median=_median(before_ccs),
-        target_after_median=_median(after_ccs),
-        target_before_max=max(before_ccs, default=0),
-        target_after_max=max(after_ccs, default=0),
+        target_cc_before_median=_median(before_ccs),
+        target_cc_after_median=_median(after_ccs),
+        target_cc_before_max=max(before_ccs, default=0),
+        target_cc_after_max=max(after_ccs, default=0),
+        target_loc_before_median=_median(before_locs),
+        target_loc_after_median=_median(after_locs),
+        target_loc_before_max=max(before_locs, default=0),
+        target_loc_after_max=max(after_locs, default=0),
+        records=records,
+    )
+
+
+def _record(target: TargetMethod, after: MethodInfo | None) -> MethodRecord:
+    return MethodRecord(
+        file=str(target.file),
+        class_name=target.class_name,
+        method=target.name,
+        matched=after is not None,
+        cc_before=target.complexity_before,
+        cc_after=after.cyclomatic_complexity if after else None,
+        loc_before=target.loc_before,
+        loc_after=after.line_count if after else None,
     )
 
 
@@ -588,6 +647,7 @@ def _run_refract(
         _restore_env(saved_env)
 
     analysis = _analyze_after(repo_dir, smell_type, smells_before, baseline, error)
+    _write_method_records(repo_dir.parent, "refract", analysis.complexity.records)
     return ToolResult(
         tool="refract",
         model=model,
@@ -761,6 +821,7 @@ def _run_codex_api_key_mode(
         proxy.stop()
 
     analysis = _analyze_after(repo_dir, smell_type, smells_before, baseline, error)
+    _write_method_records(repo_dir.parent, "codex", analysis.complexity.records)
     return ToolResult(
         tool="codex",
         model=model,
@@ -832,6 +893,7 @@ def _run_codex_chatgpt_mode(
         error, exit_code = str(exc), -1
 
     analysis = _analyze_after(repo_dir, smell_type, smells_before, baseline, error)
+    _write_method_records(repo_dir.parent, "codex", analysis.complexity.records)
     return ToolResult(
         tool="codex",
         model="codex-default",
@@ -942,6 +1004,7 @@ def _run_opencode(
 
     error = error or _no_calls_error("opencode", stats["calls"])
     analysis = _analyze_after(repo_dir, smell_type, smells_before, baseline, error)
+    _write_method_records(repo_dir.parent, "opencode", analysis.complexity.records)
     return ToolResult(
         tool="opencode",
         model=model,
@@ -1038,6 +1101,7 @@ def _run_gemini(
 
     error = error or _no_calls_error("gemini", stats["calls"])
     analysis = _analyze_after(repo_dir, smell_type, smells_before, baseline, error)
+    _write_method_records(repo_dir.parent, "gemini", analysis.complexity.records)
     return ToolResult(
         tool="gemini",
         model=model,
@@ -1086,10 +1150,7 @@ def _missing_binary(
     # the repo is untouched, so complexity is pristine: file scope unchanged,
     # every target still present (0 unmatched), before == after distribution.
     file_before = sum(baseline.file_complexity_before.values())
-    before_ccs = [t.complexity_before for t in baseline.target_methods]
-    med = _median(before_ccs)
-    mx = max(before_ccs, default=0)
-    pristine = ComplexityResult(file_before, file_before, 0, med, med, mx, mx)
+    pristine = _uniform_complexity(baseline, file_before, matched=True)
     return ToolResult(
         tool=tool,
         model=model,
@@ -1116,15 +1177,20 @@ class AfterAnalysis:
 
 def _complexity_kwargs(c: ComplexityResult) -> dict[str, float]:
     """The ComplexityResult mapped onto ToolResult's flat complexity fields, so
-    every tool's result is built from one source of truth."""
+    every tool's result is built from one source of truth. (records is dumped
+    separately to the workdir, not carried on the flat, round-trippable result.)"""
     return {
         "complexity_before": c.file_before,
         "complexity_after": c.file_after,
         "complexity_unmatched": c.unmatched,
-        "target_cc_before_median": c.target_before_median,
-        "target_cc_after_median": c.target_after_median,
-        "target_cc_before_max": c.target_before_max,
-        "target_cc_after_max": c.target_after_max,
+        "target_cc_before_median": c.target_cc_before_median,
+        "target_cc_after_median": c.target_cc_after_median,
+        "target_cc_before_max": c.target_cc_before_max,
+        "target_cc_after_max": c.target_cc_after_max,
+        "target_loc_before_median": c.target_loc_before_median,
+        "target_loc_after_median": c.target_loc_after_median,
+        "target_loc_before_max": c.target_loc_before_max,
+        "target_loc_after_max": c.target_loc_after_max,
     }
 
 
@@ -1133,11 +1199,44 @@ def _unchanged_complexity(baseline: Baseline) -> ComplexityResult:
     (a tool broke syntax so badly the parse is unusable): report file scope as
     unchanged and every target as unmatched, rather than inventing a reduction."""
     file_before = sum(baseline.file_complexity_before.values())
-    before_ccs = [t.complexity_before for t in baseline.target_methods]
-    med = _median(before_ccs)
-    mx = max(before_ccs, default=0)
+    return _uniform_complexity(baseline, file_before, matched=False)
+
+
+def _uniform_complexity(baseline: Baseline, file_before: int, matched: bool) -> ComplexityResult:
+    """A ComplexityResult for a repo whose targets are all in the same state:
+    either pristine (matched, after == before) or all gone (unmatched, no after).
+    Shared by the re-index-failed and missing-binary paths so both still carry
+    per-method records."""
+    ccs = [t.complexity_before for t in baseline.target_methods]
+    locs = [t.loc_before for t in baseline.target_methods]
+    records = [
+        MethodRecord(
+            file=str(t.file),
+            class_name=t.class_name,
+            method=t.name,
+            matched=matched,
+            cc_before=t.complexity_before,
+            cc_after=t.complexity_before if matched else None,
+            loc_before=t.loc_before,
+            loc_after=t.loc_before if matched else None,
+        )
+        for t in baseline.target_methods
+    ]
+    cc_after = ccs if matched else []
+    loc_after = locs if matched else []
     return ComplexityResult(
-        file_before, file_before, len(baseline.target_methods), med, med, mx, mx
+        file_before=file_before,
+        file_after=file_before,
+        unmatched=0 if matched else len(baseline.target_methods),
+        target_cc_before_median=_median(ccs),
+        target_cc_after_median=_median(cc_after),
+        target_cc_before_max=max(ccs, default=0),
+        target_cc_after_max=max(cc_after, default=0),
+        target_loc_before_median=_median(locs),
+        target_loc_after_median=_median(loc_after),
+        target_loc_before_max=max(locs, default=0),
+        target_loc_after_max=max(loc_after, default=0),
+        records=records,
     )
 
 
@@ -1172,6 +1271,18 @@ def _analyze_after(
         error = f"syntax error introduced in: {broken_list}"
 
     return AfterAnalysis(smells_after, complexity, len(newly_broken), tests_passed, error)
+
+
+def _write_method_records(workdir: Path, tool: str, records: list[MethodRecord]) -> None:
+    """Persist the per-target CC+LOC records next to the tool's repo copy, so
+    every flagged method's before/after is auditable from the kept workdir and
+    any aggregate is derivable post-hoc (roadmap §5). Best-effort: a metrics dump
+    must never fail the run, and it simply vanishes with an ephemeral workdir."""
+    try:
+        path = workdir / f"{tool}_metrics.json"
+        path.write_text(json.dumps([asdict(r) for r in records], indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _resolve_binary(env_var: str, tool_name: str) -> str | None:

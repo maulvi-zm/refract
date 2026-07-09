@@ -70,6 +70,7 @@ def test_target_methods_resolves_and_dedupes_same_method(tmp_path: Path) -> None
             name="progress",
             start_line=10,
             complexity_before=9,
+            loc_before=41,  # 50 - 10 + 1
         )
     ]
 
@@ -95,7 +96,12 @@ def _one_target_baseline(target: TargetMethod) -> Baseline:
 def test_complexity_after_disambiguates_same_name_different_class(tmp_path: Path) -> None:
     f = tmp_path / "mod.py"
     target = TargetMethod(
-        file=Path("mod.py"), class_name="A", name="__init__", start_line=1, complexity_before=8
+        file=Path("mod.py"),
+        class_name="A",
+        name="__init__",
+        start_line=1,
+        complexity_before=8,
+        loc_before=12,
     )
     after_index = RepositoryIndex(
         methods=[
@@ -107,8 +113,8 @@ def test_complexity_after_disambiguates_same_name_different_class(tmp_path: Path
     result = _complexity_after(after_index, tmp_path, _one_target_baseline(target))
 
     # must measure A.__init__ (CC 3), not B.__init__ (CC 1)
-    assert result.target_before_max == 8
-    assert result.target_after_max == 3
+    assert result.target_cc_before_max == 8
+    assert result.target_cc_after_max == 3
     assert result.unmatched == 0
 
 
@@ -122,6 +128,7 @@ def test_complexity_after_breaks_ties_by_line_proximity(tmp_path: Path) -> None:
         name="decorator",
         start_line=100,
         complexity_before=9,
+        loc_before=20,
     )
     after_index = RepositoryIndex(
         methods=[
@@ -134,8 +141,8 @@ def test_complexity_after_breaks_ties_by_line_proximity(tmp_path: Path) -> None:
 
     result = _complexity_after(after_index, tmp_path, _one_target_baseline(target))
 
-    assert result.target_before_max == 9
-    assert result.target_after_max == 4  # the closest match, not the far-away closure
+    assert result.target_cc_before_max == 9
+    assert result.target_cc_after_max == 4  # the closest match, not the far-away closure
     assert result.unmatched == 0
 
 
@@ -146,13 +153,14 @@ def test_complexity_after_counts_unmatched_when_method_disappears(tmp_path: Path
         name="renamed_away",
         start_line=1,
         complexity_before=9,
+        loc_before=20,
     )
     after_index = RepositoryIndex(methods=[])
 
     result = _complexity_after(after_index, tmp_path, _one_target_baseline(target))
 
     assert result.unmatched == 1
-    assert result.target_after_max == 0  # no matched target -> empty after distribution
+    assert result.target_cc_after_max == 0  # no matched target -> empty after distribution
 
 
 def test_complexity_after_counts_extracted_helpers_in_file_scope(tmp_path: Path) -> None:
@@ -160,7 +168,12 @@ def test_complexity_after_counts_extracted_helpers_in_file_scope(tmp_path: Path)
     # a CC-9 method that got split into a CC-4 remainder plus two CC-3 helpers:
     # the target sum reads -5, but the file scope is unchanged (a pure move).
     target = TargetMethod(
-        file=Path("mod.py"), class_name="<unknown>", name="big", start_line=1, complexity_before=9
+        file=Path("mod.py"),
+        class_name="<unknown>",
+        name="big",
+        start_line=1,
+        complexity_before=9,
+        loc_before=30,
     )
     baseline = Baseline(
         target_methods=[target],
@@ -181,7 +194,13 @@ def test_complexity_after_counts_extracted_helpers_in_file_scope(tmp_path: Path)
 
     assert result.file_before == 9
     assert result.file_after == 9  # 4 + 3 + 2: helpers counted, so the move nets zero
-    assert result.target_after_max == 4  # the target method itself did drop
+    assert result.target_cc_after_max == 4  # the target method itself did drop
+    # LOC tracked alongside CC: big shrank 30 -> 5 lines, and a per-method record exists
+    assert result.target_loc_before_max == 30
+    assert result.target_loc_after_max == 5
+    assert len(result.records) == 1
+    rec = result.records[0]
+    assert (rec.method, rec.matched, rec.cc_after, rec.loc_after) == ("big", True, 4, 5)
 
 
 def test_syntax_error_files_flags_broken_python(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ def _args(**overrides) -> argparse.Namespace:
         refract_provider="openai",
         test_command="auto",
         keep_workdir=None,
+        ephemeral=False,
         refract_max_attempts=3,
     )
     defaults.update(overrides)
@@ -52,7 +53,8 @@ def test_gemini_provider_and_test_command_reach_run_benchmark(
     assert mock_run.call_args.kwargs["refract_provider"] == "gemini"
     assert mock_run.call_args.kwargs["test_command"] == "mvn test -pl gson -am"
     assert mock_run.call_args.kwargs["api_key"] == "fake-key"
-    assert mock_run.call_args.kwargs["workdir"] is None  # not requested by default
+    # workdir is kept by default now -- an auto-generated persistent path
+    assert "refract-workdir" in str(mock_run.call_args.kwargs["workdir"])
 
 
 def test_keep_workdir_flag_reaches_run_benchmark(
@@ -65,3 +67,12 @@ def test_keep_workdir_flag_reaches_run_benchmark(
         _cmd_benchmark(_args(refract_provider="gemini", keep_workdir=kept))
 
     assert mock_run.call_args.kwargs["workdir"] == kept.resolve()
+
+
+def test_ephemeral_flag_disables_kept_workdir(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key")
+
+    with patch("refract.benchmark.runner.run_benchmark", return_value=[]) as mock_run:
+        _cmd_benchmark(_args(refract_provider="gemini", ephemeral=True))
+
+    assert mock_run.call_args.kwargs["workdir"] is None  # temp dir, not kept

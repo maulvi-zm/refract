@@ -4,6 +4,7 @@ import argparse
 import os
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from refract.core.config import load_dotenv
@@ -125,9 +126,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--keep-workdir",
         type=Path,
         default=None,
-        help="Persist each tool's patched repo copy under this directory instead "
-        "of a self-deleting temp dir, so the actual edits and diffs are auditable "
-        "after the run (refract_copy/, <tool>_copy/).",
+        help="Directory to persist each tool's patched repo copy + per-method "
+        "metrics under (refract_copy/, <tool>_copy/, <tool>_metrics.json). "
+        "Defaults to an auto-generated dir under ./refract-workdir/ so the edits "
+        "are auditable by default; pass a path to choose the location, or "
+        "--ephemeral to skip keeping them.",
+    )
+    bench_parser.add_argument(
+        "--ephemeral",
+        action="store_true",
+        help="Run in a self-deleting temp dir instead of keeping the patched "
+        "repos (the pre-default behavior). Overrides --keep-workdir.",
     )
     bench_parser.add_argument(
         "--refract-max-attempts",
@@ -256,6 +265,19 @@ def _cmd_check(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _resolve_workdir(args: argparse.Namespace) -> Path | None:
+    """Where to keep each tool's patched repo copy. None means a self-deleting
+    temp dir. Default is a per-run persistent dir so a dev-loop run is auditable
+    without having to pass a flag; --ephemeral opts out; --keep-workdir overrides
+    the location."""
+    if args.ephemeral:
+        return None
+    if args.keep_workdir:
+        return args.keep_workdir.resolve()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return (Path.cwd() / "refract-workdir" / f"{args.repo.name}__{args.smell}__{stamp}").resolve()
+
+
 def _cmd_benchmark(args: argparse.Namespace) -> None:
     # refract's own baseline run needs whichever key matches --refract-provider;
     # OpenAI stays the default so existing invocations behave unchanged.
@@ -275,6 +297,10 @@ def _cmd_benchmark(args: argparse.Namespace) -> None:
             f"Unknown --tools value(s): {', '.join(unknown)}. Choose from {', '.join(AGENTIC_TOOLS)}."
         )
 
+    # Keep the patched repos by default (auditable dev loop); --ephemeral opts
+    # into a self-deleting temp dir. An explicit --keep-workdir picks the location.
+    workdir = _resolve_workdir(args)
+
     print(
         f"Benchmarking refract ({args.refract_provider}) vs {', '.join(tools)} on {args.repo} "
         f"({args.smell}, model={args.model})"
@@ -292,12 +318,12 @@ def _cmd_benchmark(args: argparse.Namespace) -> None:
         refract_provider=args.refract_provider,
         test_command=args.test_command,
         verbose=args.verbose,
-        workdir=args.keep_workdir.resolve() if args.keep_workdir else None,
+        workdir=workdir,
         refract_max_attempts=args.refract_max_attempts,
     )
     print_report(results)
-    if args.keep_workdir:
-        print(f"\nPatched repos kept under {args.keep_workdir.resolve()}")
+    if workdir:
+        print(f"\nPatched repos + per-method metrics kept under {workdir}")
 
 
 def _print_smells(index: RepositoryIndex) -> None:
