@@ -73,3 +73,12 @@ class LanguageSpec:
     # one of these at root, catching the do-no-harm hole the syntax check misses.
     # Empty for languages (e.g. Python) where top-level statements are valid.
     invalid_root_child_types: frozenset[str] = frozenset()
+
+    # Statement node types that terminate control flow in a block (return /
+    # raise / throw). The patcher rejects an edit that leaves one of these
+    # followed by another (non-comment) statement in the same block -- unreachable
+    # code that a botched extract-method leaves behind when it splits a function
+    # mid-body (the extracted `def` truncates the original and orphans its tail).
+    # Valid syntax and a "shorter" method, so the syntax + smell checks miss it.
+    # Empty disables the check.
+    dead_code_terminators: frozenset[str] = frozenset()

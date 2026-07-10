@@ -139,6 +139,49 @@ def test_patcher_rejects_java_constant_hoisted_outside_class(tmp_path: Path) -> 
     assert source.read_text(encoding="utf-8") == original
 
 
+def test_patcher_rejects_edit_that_orphans_code_after_return(tmp_path: Path) -> None:
+    # The pint:long_method failure mode reduced to its fingerprint: after a
+    # botched extract-method the block has a `return` followed by a live
+    # statement -- unreachable code that runs None-returning behaviour. Valid
+    # syntax + a "shorter" method, so only the dead-code guard catches it.
+    source = tmp_path / "mod.py"
+    original = "def prepare(data):\n    out = list(data)\n    return finalize(out)\n"
+    source.write_text(original, encoding="utf-8")
+
+    botched = RefactorProposal(
+        explanation="x",
+        edits=(
+            SnippetEdit(
+                "    return finalize(out)\n",
+                "    return finalize(out)\n    out = extra(out)\n",
+            ),
+        ),
+        confidence=0.9,
+    )
+
+    with pytest.raises(ValueError):
+        apply_snippet_replacement(source, botched, apply=True)
+    assert source.read_text(encoding="utf-8") == original
+
+
+def test_dead_code_guard_allows_early_returns(tmp_path: Path) -> None:
+    # A guard clause (return nested inside an `if`, followed by more code) is not
+    # dead code -- the guard must not fire on a benign edit to such a function.
+    source = tmp_path / "mod.py"
+    source.write_text(
+        "def f(x):\n    if x < 0:\n        return 0\n    return x + 1\n", encoding="utf-8"
+    )
+    edit = RefactorProposal(
+        explanation="x",
+        edits=(SnippetEdit("    return x + 1\n", "    return x + STEP\n"),),
+        confidence=0.9,
+    )
+    # STEP is undefined, but that's a name error at runtime, not a parse/dead-code
+    # problem -- the structural guards must let it through.
+    apply_snippet_replacement(source, edit, apply=True)
+    assert "return x + STEP" in source.read_text(encoding="utf-8")
+
+
 def test_config_from_env_reads_key_and_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 

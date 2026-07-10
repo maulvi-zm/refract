@@ -31,6 +31,7 @@ def apply_snippet_replacement(file_path: Path, proposal: RefactorProposal, apply
 
     _reject_if_syntax_broken(file_path, source, updated)
     _reject_if_misplaced_root_member(file_path, source, updated)
+    _reject_if_new_dead_code(file_path, source, updated)
 
     if apply:
         file_path.write_text(updated, encoding="utf-8")
@@ -78,4 +79,41 @@ def _reject_if_misplaced_root_member(file_path: Path, source: str, updated: str)
     if _misplaced(updated) > _misplaced(source):
         raise ValueError(
             "edit places a declaration outside any type body; skipping to avoid breaking the file"
+        )
+
+
+def _reject_if_new_dead_code(file_path: Path, source: str, updated: str) -> None:
+    """Raise if the patch adds unreachable code after a control-flow terminator
+    (see ``LanguageSpec.dead_code_terminators``).
+
+    A botched extract-method splits a function by dropping the extracted ``def``
+    mid-body: the original function is truncated (silently returns None) and its
+    tail is orphaned as statements sitting after the helper's ``return``. That
+    parses cleanly and the target method looks shorter, so neither the syntax nor
+    the smell check notices -- but the behaviour is broken. We flag a terminator
+    (return / raise / throw) that is a direct block child with a later non-comment
+    sibling, and reject only when the patch introduces more of them than the
+    pristine file had (so pre-existing oddities aren't blamed on this edit).
+    """
+    spec = spec_for_path(file_path)
+    if spec is None or not spec.dead_code_terminators:
+        return
+
+    def _dead_code_blocks(text: str) -> int:
+        count = 0
+        stack = [parse(text.encode("utf-8"), spec.language)]
+        while stack:
+            node = stack.pop()
+            named = [c for c in node.children if c.is_named]
+            for i, child in enumerate(named):
+                if child.type in spec.dead_code_terminators and any(
+                    "comment" not in sib.type for sib in named[i + 1 :]
+                ):
+                    count += 1
+            stack.extend(node.children)
+        return count
+
+    if _dead_code_blocks(updated) > _dead_code_blocks(source):
+        raise ValueError(
+            "edit leaves unreachable code after a return/raise; skipping to avoid breaking the file"
         )

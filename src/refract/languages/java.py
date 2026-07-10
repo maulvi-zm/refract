@@ -184,4 +184,5 @@ JAVA = LanguageSpec(
     # so the syntax guard misses a constant the model hoisted to file scope
     # instead of into the class. Reject it structurally.
     invalid_root_child_types=frozenset({"local_variable_declaration", "field_declaration"}),
+    dead_code_terminators=frozenset({"return_statement", "throw_statement"}),
 )

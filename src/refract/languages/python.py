@@ -138,4 +138,5 @@ PYTHON = LanguageSpec(
     is_constant_definition=_is_constant_definition,
     plan_constant=_plan_constant,
     constant_pattern=re.compile(r"^[A-Z_][A-Z0-9_]*\s*(?::[^=]+)?=\s*.+$", re.MULTILINE),
+    dead_code_terminators=frozenset({"return_statement", "raise_statement"}),
 )
