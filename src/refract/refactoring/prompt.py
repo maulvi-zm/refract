@@ -7,7 +7,8 @@ from refract.refactoring.proposal import RefactorProposal
 def build_system_prompt(language: str) -> str:
     return (
         f"You are Refract, a {language} refactoring assistant.\n"
-        "Return only JSON with keys: explanation, edits, confidence. `edits` is a "
+        "Return only JSON with keys: explanation, edits, confidence. Keep "
+        "`explanation` to one short sentence. `edits` is a "
         "list of {old_snippet, new_snippet} objects, applied in order to the SAME "
         "file.\n"
         "Use several edits when the fix needs changes in more than one place -- "
@@ -15,12 +16,31 @@ def build_system_prompt(language: str) -> str:
         "that rewrites the use site; extract-method adds the helper and replaces the "
         "block with a call; renaming an identifier is one edit per occurrence. Do NOT "
         "cram multiple locations into a single snippet.\n"
+        "Place a new module-level constant on its own line at the top of the file. "
+        "Anchor the edit that adds it on a line copied verbatim from the `File header` "
+        "section below -- typically the last import line -- so it lands at module "
+        "scope. NEVER anchor it on a decorator (a line starting with @) or a def/class "
+        "line, and never insert a statement between a decorator and the function or "
+        "class it decorates, inside a call's parentheses, or in the middle of the "
+        "imports -- each of those does not parse. So a magic number inside a decorator "
+        "like @option(default=2.0) is fixed by adding the constant after the imports "
+        "and changing the argument to default=THE_CONSTANT.\n"
         "Each old_snippet must be copied verbatim from the supplied source context, "
         "character for character, including whitespace and indentation, and must match "
         "exactly one location in the file.\n"
-        "Each new_snippet must contain the complete, working replacement. Never use "
-        "placeholder comments or stub bodies. Copy every line of logic from the original "
-        "and restructure it.\n"
+        "Make each edit the SMALLEST change that fixes the smell. old_snippet must be "
+        "the shortest span that still matches exactly one location -- ideally the single "
+        "line or expression that changes, plus only enough surrounding text to be unique. "
+        "new_snippet is that same span with only the necessary change applied. A bare "
+        "literal or short token (like 1.0 or 90) usually occurs many times -- include "
+        "the surrounding assignment, call, or argument so old_snippet matches exactly "
+        "one location. NEVER "
+        "restate unchanged lines or copy a whole function body just to alter a few tokens; "
+        "the two snippets should differ only by the edited code. When a fix genuinely adds "
+        "new code (e.g. an extract-method helper), that helper is its own edit and the "
+        "block it replaces becomes just the short call site.\n"
+        "Each new_snippet must be complete and runnable for the span it covers -- never a "
+        "placeholder comment or stub body.\n"
         "The edits together must preserve all existing behavior while addressing the "
         "requested code smell.\n"
         "Do not include markdown, surrounding prose, or unrelated edits."
@@ -50,10 +70,30 @@ def build_user_prompt(context: RefactorContext) -> str:
             "Relevant constants:",
             "\n".join(f"- {c}" for c in context.constants) or "- none",
             "",
+            _file_header_section(context),
             f"Source context starts at line {context.snippet_start_line}:",
             f"```{fence}",
             context.snippet,
             "```",
+        ]
+    )
+
+
+def _file_header_section(context: RefactorContext) -> str:
+    """Show the top of the file so the model can anchor a module-level constant on
+    real header text (an import line) instead of guessing. Empty when the source
+    context already starts at the top of the file."""
+    if not context.file_header:
+        return ""
+    fence = context.fence or ""
+    return "\n".join(
+        [
+            "File header (top of the file -- add any new module-level constant here, "
+            "anchored on a line shown below, never on a decorator or def):",
+            f"```{fence}",
+            context.file_header,
+            "```",
+            "",
         ]
     )
 
@@ -97,8 +137,11 @@ def build_repair_prompt(base_user_prompt: str, proposal: RefactorProposal, error
             "Likely causes: an old_snippet that is not present verbatim in the source "
             "above (match whitespace and indentation exactly); an old_snippet that "
             "occurs more than once (extend it until it matches exactly one location); "
-            "or edits that together leave the file unparseable. Return edits that "
-            "apply cleanly and preserve behavior.",
+            "or edits that together leave the file unparseable -- most often a new "
+            "definition placed where a statement is illegal (between a decorator and "
+            "its function/class, inside a call's parentheses, or splitting the "
+            "imports). Put extracted constants at the top of the file after the "
+            "imports. Return edits that apply cleanly and preserve behavior.",
         ]
     )
 
