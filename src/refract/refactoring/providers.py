@@ -5,7 +5,7 @@ import os
 import time
 from typing import Any
 from urllib import request
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from refract.refactoring.proposal import ProviderConfig, ProviderName, RefactorProposal
 
@@ -16,6 +16,11 @@ from refract.refactoring.proposal import ProviderConfig, ProviderName, RefactorP
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _MAX_ATTEMPTS = 3
 _BACKOFF_SECONDS = 1.0
+# Reasoning models (e.g. deepseek-v4-pro) can spend well over a minute thinking
+# before the first token; a 60s ceiling was cutting otherwise-clean fixes off
+# mid-flight. Generous enough to let them finish, still bounded so a truly hung
+# call doesn't wait forever.
+_TIMEOUT_SECONDS = 240
 
 DEFAULT_MODELS: dict[ProviderName, str] = {
     ProviderName.OPENAI: "gpt-4.1",
@@ -148,10 +153,19 @@ def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> di
     for attempt in range(_MAX_ATTEMPTS):
         req = request.Request(url, data=body, headers=headers, method="POST")
         try:
-            with request.urlopen(req, timeout=60) as response:
+            with request.urlopen(req, timeout=_TIMEOUT_SECONDS) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             if exc.code not in _RETRYABLE_STATUSES or attempt == _MAX_ATTEMPTS - 1:
+                raise
+            time.sleep(_BACKOFF_SECONDS * (2**attempt))
+        except (TimeoutError, URLError) as exc:
+            # A socket timeout or dropped connection isn't an HTTP status, so the
+            # branch above never sees it -- yet it's the same kind of transient,
+            # retryable failure (a slow reasoning model, a flaky network) and
+            # shouldn't permanently skip the target. Retry with backoff; only the
+            # final attempt propagates.
+            if attempt == _MAX_ATTEMPTS - 1:
                 raise
             time.sleep(_BACKOFF_SECONDS * (2**attempt))
     raise AssertionError("unreachable: loop always returns or raises")
