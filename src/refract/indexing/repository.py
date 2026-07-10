@@ -8,11 +8,26 @@ from refract.indexing.detectors import detect_smells
 from refract.indexing.methods import extract_methods
 from refract.languages.registry import spec_for_path
 
-# test/build/tooling trees, matched against posix paths
+# test/build/tooling trees, matched against the repo-RELATIVE posix path
+# (with a leading "/" prepended by in_scope) so an ancestor directory that
+# happens to contain e.g. "test" (a home dir like /Users/tester/...) can't
+# silently exclude the entire repo.
 _EXCLUDE = re.compile(
     "|".join(
         (
-            r"/src/test/",
+            # Any path component starting with "test" -- mirrors the dataset's
+            # ground-truth rule (tools/scripts/gen_markdown.py: Java "*/test*",
+            # Python "*test*") so refract's refactor targeting matches the
+            # "application code only" counts and never edits a test file. Covers
+            # Java src/test, Python tests/ & testsuite/, pytest test_*.py /
+            # conftest.py, and the public testing.py helpers (click.testing,
+            # pint.testing) that the dataset also treats as test code. Renaming
+            # inside test files is pure risk with no study value -- a pytest
+            # `@parametrize("name", ...)` binds by string literal, which an
+            # AST-level rename can't see, so it breaks collection (see the
+            # click long_identifier regression, refract-run3-behavior-failures).
+            r"/test",
+            r"/conftest\.py$",  # pytest config file -- doesn't start with "test"
             r"/src/it/",
             r"/xdocs-examples/",
             r"/resources/",
@@ -25,16 +40,19 @@ _EXCLUDE = re.compile(
 )
 
 
-def in_scope(path: Path) -> bool:
-    return _EXCLUDE.search(path.as_posix()) is None
+def in_scope(rel_path: Path) -> bool:
+    # rel_path is relative to the repo root; the leading "/" anchors patterns
+    # like /src/test/ and keeps ancestor directories out of the match.
+    return _EXCLUDE.search("/" + rel_path.as_posix()) is None
 
 
 def source_files(root: Path) -> list[Path]:
     # absolute + sorted: stable order, and no path guessing downstream
+    root = root.resolve()
     return [
         path
-        for path in sorted(root.resolve().rglob("*"))
-        if path.is_file() and spec_for_path(path) is not None and in_scope(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and spec_for_path(path) is not None and in_scope(path.relative_to(root))
     ]
 
 

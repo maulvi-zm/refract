@@ -8,6 +8,22 @@ from tree_sitter import Language, Node
 
 
 @dataclass(frozen=True)
+class ConstantPlan:
+    """Where and how to insert a hoisted magic-number constant.
+
+    Language-agnostic instructions the deterministic extract-constant builder
+    turns into a ``SnippetEdit``: append ``indent + text`` on the line after
+    ``anchor_row``. Python renders a module-scope ``NAME = value`` after the
+    header; Java renders a ``private static final <type> NAME = value;`` field
+    just inside the enclosing class. See languages' ``plan_constant``.
+    """
+
+    anchor_row: int  # 0-based source row to insert the definition *after*
+    indent: str  # leading whitespace for the definition line
+    text: str  # the rendered definition (no leading indent, no trailing newline)
+
+
+@dataclass(frozen=True)
 class LanguageSpec:
     name: str
     extensions: tuple[str, ...]
@@ -39,7 +55,21 @@ class LanguageSpec:
     number_query: str  # @number for numeric literals
     ignored_numbers: frozenset[str]
     is_constant_definition: Callable[[Node, bytes], bool]
+    # (root, literal, data, const_name) -> where/how to define the constant, or
+    # None to fall back to the model when it can't be done deterministically.
+    plan_constant: Callable[[Node, Node, bytes, str], "ConstantPlan | None"]
 
     # --- planning context ---
     # lines matching this are shown to the LLM as relevant constants
     constant_pattern: re.Pattern[str] | None = None
+
+    # --- structural guard ---
+    # node types that are illegal as a *direct child* of the parse root (the
+    # compilation unit / module). tree-sitter is error-tolerant and parses some
+    # misplaced declarations without an ERROR node -- e.g. a Java
+    # `static final` field hoisted to file scope reads as a valid
+    # `local_variable_declaration` under `program`, so `has_error` stays False
+    # even though javac rejects it. The patcher rejects any edit that introduces
+    # one of these at root, catching the do-no-harm hole the syntax check misses.
+    # Empty for languages (e.g. Python) where top-level statements are valid.
+    invalid_root_child_types: frozenset[str] = frozenset()

@@ -30,6 +30,7 @@ def apply_snippet_replacement(file_path: Path, proposal: RefactorProposal, apply
         updated = updated.replace(edit.old_snippet, edit.new_snippet, 1)
 
     _reject_if_syntax_broken(file_path, source, updated)
+    _reject_if_misplaced_root_member(file_path, source, updated)
 
     if apply:
         file_path.write_text(updated, encoding="utf-8")
@@ -53,3 +54,28 @@ def _reject_if_syntax_broken(file_path: Path, source: str, updated: str) -> None
     after_broken = parse(updated.encode("utf-8"), spec.language).has_error
     if after_broken and not before_broken:
         raise ValueError("edit introduces a syntax error; skipping to avoid breaking the file")
+
+
+def _reject_if_misplaced_root_member(file_path: Path, source: str, updated: str) -> None:
+    """Raise if the patch introduces a declaration illegal at compilation-unit
+    scope (see ``LanguageSpec.invalid_root_child_types``).
+
+    tree-sitter parses e.g. a Java ``static final`` field hoisted to file scope
+    as a valid ``local_variable_declaration`` under ``program`` -- no ERROR node,
+    so ``_reject_if_syntax_broken`` waves it through even though it won't compile.
+    Compare the count of such direct root children before and after so a genuine
+    do-no-harm violation is caught while any pre-existing oddity isn't blamed on
+    this edit.
+    """
+    spec = spec_for_path(file_path)
+    if spec is None or not spec.invalid_root_child_types:
+        return
+
+    def _misplaced(text: str) -> int:
+        root = parse(text.encode("utf-8"), spec.language)
+        return sum(1 for c in root.children if c.type in spec.invalid_root_child_types)
+
+    if _misplaced(updated) > _misplaced(source):
+        raise ValueError(
+            "edit places a declaration outside any type body; skipping to avoid breaking the file"
+        )

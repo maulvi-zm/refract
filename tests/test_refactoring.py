@@ -110,6 +110,35 @@ def test_patcher_rejects_edit_that_breaks_syntax(tmp_path: Path) -> None:
     assert source.read_text(encoding="utf-8") == original
 
 
+def test_patcher_rejects_java_constant_hoisted_outside_class(tmp_path: Path) -> None:
+    # tree-sitter parses a `static final` field at file scope as a valid
+    # local_variable_declaration (no ERROR node), so the syntax guard alone lets
+    # it through -- but javac won't compile it. The structural guard must reject
+    # a declaration placed directly under the compilation unit.
+    source = tmp_path / "Example.java"
+    original = (
+        "import java.io.IOException;\n\npublic class Example {\n    int f() { return 8; }\n}\n"
+    )
+    source.write_text(original, encoding="utf-8")
+
+    hoisted = RefactorProposal(
+        explanation="x",
+        edits=(
+            SnippetEdit(
+                "import java.io.IOException;",
+                "import java.io.IOException;\n\nprivate static final int BITS = 8;",
+            ),
+            SnippetEdit("return 8", "return BITS"),
+        ),
+        confidence=0.9,
+    )
+
+    with pytest.raises(ValueError):
+        apply_snippet_replacement(source, hoisted, apply=True)
+    # do no harm: the file on disk is untouched
+    assert source.read_text(encoding="utf-8") == original
+
+
 def test_config_from_env_reads_key_and_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
@@ -200,7 +229,9 @@ def test_max_attempts_one_disables_retry(tmp_path: Path) -> None:
 
 def test_run_refactor_prefers_deterministic_constant_extraction(tmp_path: Path) -> None:
     source = tmp_path / "mod.py"
-    source.write_text("import os\n\n\ndef target():\n    return os.read(0, 4096)\n", encoding="utf-8")
+    source.write_text(
+        "import os\n\n\ndef target():\n    return os.read(0, 4096)\n", encoding="utf-8"
+    )
 
     index = RepositoryIndex(
         methods=[MethodInfo("target", "<unknown>", source, 4, 5, 1)],

@@ -2,9 +2,10 @@
 
 The model only picks a name; refract does the mechanical part. Because a magic
 number smell already carries the file, the line, and the literal text, refract
-can re-find the exact tree-sitter node itself, compute a valid module-level
-insertion point, and build the two edits (define the constant, rewrite the use
-site) straight from the real source -- so the snippets match by construction.
+can re-find the exact tree-sitter node itself, ask the language spec for a valid
+insertion point (module scope in Python, inside the enclosing class in Java),
+and build the two edits (define the constant, rewrite the use site) straight
+from the real source -- so the snippets match by construction.
 
 This removes the one failure the snippet approach can't tune away: asking the
 model to reproduce a multi-line, decorator-dense span character-for-character.
@@ -21,28 +22,25 @@ from tree_sitter import Node
 
 from refract.core.models import SmellLocation
 from refract.indexing.parser import compile_query, matches, node_text, parse
+from refract.languages.base import ConstantPlan
 from refract.languages.registry import spec_for_path
 from refract.refactoring.patcher import apply_snippet_replacement
 from refract.refactoring.proposal import RefactorProposal, SnippetEdit
 
-# Top-level nodes a new constant may safely be placed after: the module docstring
-# and comments/imports. We anchor on the last of these and stop at the first real
-# statement, so the definition always lands at module scope.
-_IMPORT_TYPES = frozenset(
-    {"import_statement", "import_from_statement", "future_import_statement"}
-)
 _MAX_WINDOW_LINES = 8  # how far a snippet window may grow reaching for uniqueness
 
 
 def build_constant_extraction(
     file_path: Path, smell: SmellLocation, const_name: str
 ) -> RefactorProposal | None:
-    """Build the edits to hoist ``smell``'s literal into a module constant.
+    """Build the edits to hoist ``smell``'s literal into a named constant.
 
     Returns a proposal proven to apply cleanly (validated by a dry run through
     the normal patcher, syntax guard included), or None when the fix can't be
     made deterministically -- an unknown language, a bad name, a literal that
-    isn't uniquely locatable, or a literal that already lives in the header.
+    isn't uniquely locatable, or one the language spec can't place a constant
+    for (e.g. a Java literal outside any plain class). The placement is
+    per-language via ``spec.plan_constant``; the edits are language-agnostic.
     """
     spec = spec_for_path(file_path)
     if spec is None or not _is_valid_name(const_name):
@@ -56,17 +54,16 @@ def build_constant_extraction(
     if literal is None:
         return None
 
-    anchor_row = _header_anchor_row(root)
-    if anchor_row is None or literal.start_point[0] <= anchor_row:
-        # no safe module-level anchor, or the literal sits inside the header
+    plan = spec.plan_constant(root, literal, data, const_name)
+    if plan is None:
         return None
 
-    value = node_text(literal, data)
-    definition = _definition_edit(source, data, anchor_row, const_name, value)
+    definition = _definition_edit(source, data, plan)
     use_site = _use_site_edit(source, data, literal, const_name)
     if definition is None or use_site is None:
         return None
 
+    value = node_text(literal, data)
     proposal = RefactorProposal(
         explanation=f"Extract magic number {value} into constant {const_name}.",
         edits=(definition, use_site),
@@ -84,9 +81,7 @@ def _is_valid_name(name: str) -> bool:
     return name.isidentifier() and not keyword.iskeyword(name)
 
 
-def _locate_literal(
-    root: Node, data: bytes, spec, smell: SmellLocation
-) -> Node | None:
+def _locate_literal(root: Node, data: bytes, spec, smell: SmellLocation) -> Node | None:
     """The single numeric-literal node matching the smell's line and text.
 
     Mirrors the detector's own filtering (ignored numbers, existing constant
@@ -106,44 +101,17 @@ def _locate_literal(
     return hits[0] if len(hits) == 1 else None
 
 
-def _header_anchor_row(root: Node) -> int | None:
-    """0-based row to insert the constant after: the last leading comment,
-    module docstring, or import. None when the file opens with real code."""
-    anchor: int | None = None
-    for index, child in enumerate(root.children):
-        if child.type in _IMPORT_TYPES or child.type == "comment":
-            anchor = child.end_point[0]
-        elif index == 0 and _is_docstring(child):
-            anchor = child.end_point[0]
-        else:
-            break
-    return anchor
-
-
-def _is_docstring(node: Node) -> bool:
-    return (
-        node.type == "expression_statement"
-        and node.child_count > 0
-        and node.children[0].type == "string"
-    )
-
-
-def _definition_edit(
-    source: str, data: bytes, anchor_row: int, name: str, value: str
-) -> SnippetEdit | None:
-    """Append ``name = value`` right after the anchor line, keying the edit on a
-    unique window ending at that line so it lands at module scope."""
-    start, end = _row_bounds(data, anchor_row)
+def _definition_edit(source: str, data: bytes, plan: ConstantPlan) -> SnippetEdit | None:
+    """Append the planned definition right after the anchor line, keying the edit
+    on a unique window ending at that line so it lands where the spec intends."""
+    start, end = _row_bounds(data, plan.anchor_row)
     window = _unique_window(source, data, start, end)
     if window is None:
         return None
-    old = window
-    return SnippetEdit(old_snippet=old, new_snippet=f"{old}\n{name} = {value}")
+    return SnippetEdit(old_snippet=window, new_snippet=f"{window}\n{plan.indent}{plan.text}")
 
 
-def _use_site_edit(
-    source: str, data: bytes, literal: Node, name: str
-) -> SnippetEdit | None:
+def _use_site_edit(source: str, data: bytes, literal: Node, name: str) -> SnippetEdit | None:
     """Replace just the flagged literal with ``name``, keying the edit on the
     smallest whole-line window around it that is unique in the file."""
     window = _unique_window(source, data, literal.start_byte, literal.end_byte)

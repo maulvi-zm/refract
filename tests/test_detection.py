@@ -91,3 +91,47 @@ def test_unsupported_files_are_skipped(tmp_path: Path) -> None:
     index = index_repository(tmp_path)
 
     assert all(m.file.suffix == ".py" for m in index.methods)
+
+
+def _write_nested(tmp_path: Path, rel: str, source: str) -> Path:
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
+def test_test_files_are_excluded_from_indexing(tmp_path: Path) -> None:
+    # Application code is indexed; test code is not -- refract must never edit a
+    # test file (renaming a pytest parametrize/fixture binds by string literal
+    # and breaks collection). Mirrors the dataset's application-code-only scope.
+    _write_nested(tmp_path, "src/pkg/app.py", PYTHON_SOURCE)
+    _write_nested(tmp_path, "tests/test_app.py", PYTHON_SOURCE)  # tests/ dir
+    _write_nested(tmp_path, "pkg/testsuite/test_x.py", PYTHON_SOURCE)  # testsuite/ (pint)
+    _write_nested(tmp_path, "pkg/conftest.py", PYTHON_SOURCE)  # pytest conftest
+    _write_nested(tmp_path, "pkg/testing.py", PYTHON_SOURCE)  # public testing helper
+    _write_nested(tmp_path, "src/main/java/App.java", JAVA_SOURCE)
+    _write_nested(tmp_path, "src/test/java/AppTest.java", JAVA_SOURCE)  # Java test tree
+
+    indexed = {m.file for m in index_repository(tmp_path).methods}
+
+    assert (tmp_path / "src/pkg/app.py").resolve() in indexed
+    assert (tmp_path / "src/main/java/App.java").resolve() in indexed
+    for excluded in (
+        "tests/test_app.py",
+        "pkg/testsuite/test_x.py",
+        "pkg/conftest.py",
+        "pkg/testing.py",
+        "src/test/java/AppTest.java",
+    ):
+        assert (tmp_path / excluded).resolve() not in indexed, excluded
+
+
+def test_ancestor_dir_named_test_does_not_exclude_repo(tmp_path: Path) -> None:
+    # The match is anchored to the repo-relative path, so a repo living under an
+    # ancestor like ".../tester/" must still index its application code.
+    repo = tmp_path / "tester" / "myrepo"
+    _write_nested(repo, "src/app.py", PYTHON_SOURCE)
+
+    indexed = {m.file for m in index_repository(repo).methods}
+
+    assert (repo / "src/app.py").resolve() in indexed

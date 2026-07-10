@@ -159,7 +159,7 @@ def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any]) -> di
             if exc.code not in _RETRYABLE_STATUSES or attempt == _MAX_ATTEMPTS - 1:
                 raise
             time.sleep(_BACKOFF_SECONDS * (2**attempt))
-        except (TimeoutError, URLError) as exc:
+        except (TimeoutError, URLError):
             # A socket timeout or dropped connection isn't an HTTP status, so the
             # branch above never sees it -- yet it's the same kind of transient,
             # retryable failure (a slow reasoning model, a flaky network) and
