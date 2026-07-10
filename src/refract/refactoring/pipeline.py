@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,8 +94,10 @@ def _propose_and_apply(
         proposal = provider.propose(system_prompt, user_prompt)
         try:
             apply_snippet_replacement(file_path, proposal, apply)
+            _debug_dump(file_path, attempt, proposal, None)
             return proposal, attempt
         except ValueError as exc:
+            _debug_dump(file_path, attempt, proposal, str(exc))
             last_error = exc
             print(
                 f"Warning: {file_path}: attempt {attempt}/{attempts} rejected: {exc}",
@@ -104,3 +108,20 @@ def _propose_and_apply(
 
     assert last_error is not None  # the loop ran at least once and never returned
     raise last_error
+
+
+def _debug_dump(
+    file_path: Path, attempt: int, proposal: RefactorProposal, error: str | None
+) -> None:
+    """Append each proposal + outcome to REFRACT_DEBUG_DUMP (JSONL) when set. Diagnostics only."""
+    path = os.getenv("REFRACT_DEBUG_DUMP")
+    if not path:
+        return
+    record = {
+        "file": str(file_path),
+        "attempt": attempt,
+        "error": error,
+        "edits": [{"old": e.old_snippet, "new": e.new_snippet} for e in proposal.edits],
+    }
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record) + "\n")
