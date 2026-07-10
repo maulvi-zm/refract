@@ -6,9 +6,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from refract.core.models import RepositoryIndex, SmellType
+from refract.core.models import RepositoryIndex, SmellLocation, SmellType
 from refract.indexing.repository import index_repository
 from refract.planning.context import RefactorContext, build_context
+from refract.refactoring.extract_constant import build_constant_extraction
 from refract.refactoring.patcher import apply_snippet_replacement
 from refract.refactoring.prompt import build_repair_prompt, build_system_prompt, build_user_prompt
 from refract.refactoring.proposal import RefactorProposal, RefactorProvider
@@ -53,7 +54,7 @@ def run_refactor(
             file_path = smell.file if smell.file.is_absolute() else repo_root / smell.file
 
             proposal, attempts = _propose_and_apply(
-                provider, system_prompt, base_user_prompt, file_path, apply, max_attempts
+                provider, system_prompt, base_user_prompt, file_path, smell, apply, max_attempts
             )
             results.append(
                 RefactorResult(context=context, proposal=proposal, applied=apply, attempts=attempts)
@@ -73,6 +74,7 @@ def _propose_and_apply(
     system_prompt: str,
     base_user_prompt: str,
     file_path: Path,
+    smell: SmellLocation,
     apply: bool,
     max_attempts: int,
 ) -> tuple[RefactorProposal, int]:
@@ -85,13 +87,18 @@ def _propose_and_apply(
     just skips the target, leaving it untouched. Only ValueErrors from applying
     are retried (bad snippet / ambiguous match / unparseable patch); a provider
     or network error propagates straight out to be skipped.
+
+    For a magic-number fix the model only names the constant; ``_effective_proposal``
+    then swaps in a deterministically-built extraction (see extract_constant.py)
+    that is guaranteed to match, so those targets don't depend on the model
+    reproducing the source verbatim and never hit the retry loop.
     """
     user_prompt = base_user_prompt
     last_error: ValueError | None = None
     attempts = max(1, max_attempts)
 
     for attempt in range(1, attempts + 1):
-        proposal = provider.propose(system_prompt, user_prompt)
+        proposal = _effective_proposal(smell, provider.propose(system_prompt, user_prompt), file_path)
         try:
             apply_snippet_replacement(file_path, proposal, apply)
             _debug_dump(file_path, attempt, proposal, None)
@@ -108,6 +115,19 @@ def _propose_and_apply(
 
     assert last_error is not None  # the loop ran at least once and never returned
     raise last_error
+
+
+def _effective_proposal(
+    smell: SmellLocation, proposal: RefactorProposal, file_path: Path
+) -> RefactorProposal:
+    """Prefer a deterministic extraction for a named magic-number constant, else
+    keep the model's own edits. Falls back to the model whenever the literal
+    can't be located unambiguously, so nothing is lost by trying."""
+    if smell.smell is SmellType.MAGIC_NUMBER and proposal.constant_name.strip():
+        deterministic = build_constant_extraction(file_path, smell, proposal.constant_name.strip())
+        if deterministic is not None:
+            return deterministic
+    return proposal
 
 
 def _debug_dump(

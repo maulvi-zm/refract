@@ -198,6 +198,34 @@ def test_max_attempts_one_disables_retry(tmp_path: Path) -> None:
     assert results == []
 
 
+def test_run_refactor_prefers_deterministic_constant_extraction(tmp_path: Path) -> None:
+    source = tmp_path / "mod.py"
+    source.write_text("import os\n\n\ndef target():\n    return os.read(0, 4096)\n", encoding="utf-8")
+
+    index = RepositoryIndex(
+        methods=[MethodInfo("target", "<unknown>", source, 4, 5, 1)],
+        smells=[SmellLocation(SmellType.MAGIC_NUMBER, source, 5, "4096", "magic")],
+    )
+    # the model only names the constant and ships a deliberately non-matching edit;
+    # the deterministic path must rescue it and land on the first attempt.
+    proposal = RefactorProposal(
+        explanation="x",
+        edits=(SnippetEdit("this does not match anything", "nope"),),
+        confidence=0.9,
+        constant_name="BUFFER_SIZE",
+    )
+    provider = _QueueProvider([proposal])
+
+    results = run_refactor(index, tmp_path, SmellType.MAGIC_NUMBER, 1, provider, True)
+
+    text = source.read_text(encoding="utf-8")
+    assert provider.calls == 1  # no retries: the extraction applies immediately
+    assert results[0].attempts == 1
+    assert "BUFFER_SIZE = 4096" in text
+    assert text.index("BUFFER_SIZE = 4096") < text.index("def target()")
+    assert "os.read(0, BUFFER_SIZE)" in text
+
+
 def test_build_repair_prompt_includes_error_and_failed_edit() -> None:
     from refract.refactoring.prompt import build_repair_prompt
 
