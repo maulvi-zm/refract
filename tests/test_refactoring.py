@@ -182,6 +182,48 @@ def test_dead_code_guard_allows_early_returns(tmp_path: Path) -> None:
     assert "return x + STEP" in source.read_text(encoding="utf-8")
 
 
+def test_patcher_rejects_incomplete_identifier_rename(tmp_path: Path) -> None:
+    # pint:long_identifier failure: the model renamed the declaration but missed a
+    # use, leaving a dangling reference that parses fine but fails at runtime.
+    source = tmp_path / "converters.py"
+    original = (
+        "class C:\n"
+        "    _param_names_to_subclass = {}\n\n"
+        "    def get(self, k):\n"
+        "        return self._param_names_to_subclass[k]\n"
+    )
+    source.write_text(original, encoding="utf-8")
+
+    incomplete = _proposal("    _param_names_to_subclass = {}\n", "    _param_map = {}\n")
+
+    with pytest.raises(ValueError):
+        apply_snippet_replacement(
+            source, incomplete, apply=True, rename_of="_param_names_to_subclass"
+        )
+    assert source.read_text(encoding="utf-8") == original
+
+
+def test_patcher_allows_complete_identifier_rename(tmp_path: Path) -> None:
+    source = tmp_path / "converters.py"
+    source.write_text(
+        "class C:\n"
+        "    _param_names_to_subclass = {}\n\n"
+        "    def get(self, k):\n"
+        "        return self._param_names_to_subclass[k]\n",
+        encoding="utf-8",
+    )
+    complete = RefactorProposal(
+        explanation="x",
+        edits=(
+            SnippetEdit("_param_names_to_subclass = {}", "_param_map = {}"),
+            SnippetEdit("self._param_names_to_subclass[k]", "self._param_map[k]"),
+        ),
+        confidence=0.9,
+    )
+    apply_snippet_replacement(source, complete, apply=True, rename_of="_param_names_to_subclass")
+    assert "_param_names_to_subclass" not in source.read_text(encoding="utf-8")
+
+
 def test_config_from_env_reads_key_and_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 

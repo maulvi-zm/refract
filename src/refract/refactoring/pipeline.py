@@ -97,10 +97,14 @@ def _propose_and_apply(
     last_error: ValueError | None = None
     attempts = max(1, max_attempts)
 
+    rename_of = smell.identifier if smell.smell is SmellType.LONG_IDENTIFIER else None
+
     for attempt in range(1, attempts + 1):
-        proposal = _effective_proposal(smell, provider.propose(system_prompt, user_prompt), file_path)
+        proposal = _effective_proposal(
+            smell, provider.propose(system_prompt, user_prompt), file_path
+        )
         try:
-            apply_snippet_replacement(file_path, proposal, apply)
+            apply_snippet_replacement(file_path, proposal, apply, rename_of=rename_of)
             _debug_dump(file_path, attempt, proposal, None)
             return proposal, attempt
         except ValueError as exc:

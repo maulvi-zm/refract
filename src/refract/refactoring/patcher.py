@@ -7,7 +7,12 @@ from refract.languages.registry import spec_for_path
 from refract.refactoring.proposal import RefactorProposal, validate_replacement
 
 
-def apply_snippet_replacement(file_path: Path, proposal: RefactorProposal, apply: bool) -> str:
+def apply_snippet_replacement(
+    file_path: Path,
+    proposal: RefactorProposal,
+    apply: bool,
+    rename_of: str | None = None,
+) -> str:
     """Return the patched text, writing to disk only when apply is True.
 
     Applies the proposal's edits in order, each against the running text (so an
@@ -16,6 +21,10 @@ def apply_snippet_replacement(file_path: Path, proposal: RefactorProposal, apply
     harm: a broken edit raises and nothing is written, so the caller skips the
     target and leaves the file exactly as it was (see the improvement plan's
     guiding principle -- a non-fix beats a broken fix).
+
+    ``rename_of`` names the identifier a long-identifier fix is renaming away; the
+    patch is rejected if any occurrence of it survives (an incomplete rename that
+    parses but leaves a dangling reference).
     """
     source = file_path.read_text(encoding="utf-8")
     validate_replacement(source, proposal)
@@ -32,6 +41,8 @@ def apply_snippet_replacement(file_path: Path, proposal: RefactorProposal, apply
     _reject_if_syntax_broken(file_path, source, updated)
     _reject_if_misplaced_root_member(file_path, source, updated)
     _reject_if_new_dead_code(file_path, source, updated)
+    if rename_of is not None:
+        _reject_if_identifier_remains(file_path, updated, rename_of)
 
     if apply:
         file_path.write_text(updated, encoding="utf-8")
@@ -117,3 +128,32 @@ def _reject_if_new_dead_code(file_path: Path, source: str, updated: str) -> None
         raise ValueError(
             "edit leaves unreachable code after a return/raise; skipping to avoid breaking the file"
         )
+
+
+def _reject_if_identifier_remains(file_path: Path, updated: str, old_identifier: str) -> None:
+    """Raise if ``old_identifier`` still occurs as an identifier token in the
+    patched text -- an incomplete rename.
+
+    A long-identifier fix must rename EVERY occurrence; when the model changes the
+    declaration but misses a use (e.g. it only saw part of the file), the leftover
+    reference still parses but is now dangling -- a NameError / AttributeError at
+    runtime, invisible to the syntax check. Comparing identifier tokens (not raw
+    text) ignores the name inside strings and comments, which a rename leaves
+    alone on purpose. Conservative: if the same spelling names an unrelated
+    binding elsewhere this over-rejects, but a safe skip beats a broken rename.
+    """
+    spec = spec_for_path(file_path)
+    if spec is None:
+        return
+
+    data = updated.encode("utf-8")
+    target = old_identifier.encode("utf-8")
+    stack = [parse(data, spec.language)]
+    while stack:
+        node = stack.pop()
+        if node.type == "identifier" and data[node.start_byte : node.end_byte] == target:
+            raise ValueError(
+                f"rename left an occurrence of '{old_identifier}' behind; "
+                "skipping incomplete rename to avoid a dangling reference"
+            )
+        stack.extend(node.children)
