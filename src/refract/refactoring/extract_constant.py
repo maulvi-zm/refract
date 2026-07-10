@@ -16,6 +16,7 @@ caller falls back to the model's own edits, so do-no-harm is preserved.
 from __future__ import annotations
 
 import keyword
+import re
 from pathlib import Path
 
 from tree_sitter import Node
@@ -58,15 +59,34 @@ def build_constant_extraction(
     if plan is None:
         return None
 
-    definition = _definition_edit(source, data, plan)
-    use_site = _use_site_edit(source, data, literal, const_name)
-    if definition is None or use_site is None:
+    # An earlier target in the same file may already have hoisted this literal
+    # under this name (the model names constants independently, so two equal
+    # literals often collide on one name). Re-adding the definition would create
+    # a duplicate declaration -- a compile error in Java that tree-sitter still
+    # parses without an ERROR, so the syntax guard misses it. If the identical
+    # definition is already present, reuse it (rewrite the use site only); if the
+    # name is taken by a *different* definition, decline to the model rather than
+    # bind the use site to the wrong value.
+    existing = _existing_definition(source, plan.text, const_name)
+    if existing == "conflict":
         return None
+
+    use_site = _use_site_edit(source, data, literal, const_name)
+    if use_site is None:
+        return None
+
+    if existing == "present":
+        edits: tuple[SnippetEdit, ...] = (use_site,)
+    else:
+        definition = _definition_edit(source, data, plan)
+        if definition is None:
+            return None
+        edits = (definition, use_site)
 
     value = node_text(literal, data)
     proposal = RefactorProposal(
         explanation=f"Extract magic number {value} into constant {const_name}.",
-        edits=(definition, use_site),
+        edits=edits,
         confidence=1.0,
         constant_name=const_name,
     )
@@ -79,6 +99,24 @@ def build_constant_extraction(
 
 def _is_valid_name(name: str) -> bool:
     return name.isidentifier() and not keyword.iskeyword(name)
+
+
+def _existing_definition(source: str, definition_text: str, name: str) -> str:
+    """Whether ``name`` is already defined in ``source``.
+
+    Returns ``"present"`` when the exact ``definition_text`` line is already
+    there (an earlier target hoisted the same literal under the same name --
+    reuse it), ``"conflict"`` when ``name`` is assigned by some *other*
+    definition (extracting under it would bind the use site to a different
+    value -- decline), and ``"absent"`` otherwise. The assignment probe matches
+    a definition of ``name`` (``NAME =``, ``NAME: T =``, or ``... NAME =``) while
+    excluding ``==`` and uses where ``name`` is on the right-hand side.
+    """
+    if definition_text.strip() in source:
+        return "present"
+    if re.search(rf"\b{re.escape(name)}\b\s*(?::[^=\n]+)?=(?!=)", source):
+        return "conflict"
+    return "absent"
 
 
 def _locate_literal(root: Node, data: bytes, spec, smell: SmellLocation) -> Node | None:

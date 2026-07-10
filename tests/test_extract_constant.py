@@ -194,3 +194,38 @@ def test_java_infers_field_type_from_literal(tmp_path: Path) -> None:
     assert _java_type_for(tmp_path, "0xff") == "int"
     # a decimal literal above Integer.MAX_VALUE must be declared long
     assert _java_type_for(tmp_path, "3000000000") == "long"
+
+
+def test_java_reuses_existing_constant_instead_of_redefining(tmp_path: Path) -> None:
+    # An earlier target already hoisted 0xff as MASK_BYTE; extracting a second
+    # 0xff under the same name must REUSE it (use-site edit only), never add a
+    # duplicate `private static final` field (a Java compile error tree-sitter
+    # parses without an ERROR -- the commons-io/EndianUtils regression).
+    source = (
+        "package x;\n\n"
+        "public class C {\n"
+        "    private static final int MASK_BYTE = 0xff;\n\n"
+        "    int a(final int v) {\n        return v & 0xff;\n    }\n"
+        "}\n"
+    )
+    path = _write(tmp_path, "C.java", source)
+    use_line = next(i for i, t in enumerate(source.splitlines(), 1) if "return v & 0xff" in t)
+    smell = SmellLocation(SmellType.MAGIC_NUMBER, path, use_line, "0xff", "magic")
+
+    proposal = build_constant_extraction(path, smell, "MASK_BYTE")
+
+    assert proposal is not None
+    assert len(proposal.edits) == 1  # use-site rewrite only, no second definition
+    patched = apply_snippet_replacement(path, proposal, apply=False)
+    assert patched.count("private static final int MASK_BYTE = 0xff;") == 1
+    assert "return v & MASK_BYTE" in patched
+    assert _parses(path, patched)
+
+
+def test_declines_when_name_taken_by_a_different_definition(tmp_path: Path) -> None:
+    # MASK is already bound to a different value; extracting 255 under MASK would
+    # silently change behavior, so the deterministic path declines to the model.
+    source = "import os\n\nMASK = 7\n\n\ndef f():\n    return 255\n"
+    path = _write(tmp_path, "m.py", source)
+
+    assert build_constant_extraction(path, _smell(path, "255", source), "MASK") is None
