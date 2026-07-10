@@ -616,7 +616,11 @@ def _run_refract(
             "REFRACT_MODEL": model,
         }
     else:
-        proxy = CountingProxy("https://api.openai.com")
+        # honor a caller-supplied OpenAI-compatible endpoint (e.g. OpenRouter) as
+        # the real upstream, so the proxy forwards there instead of api.openai.com;
+        # captured before we point OPENAI_BASE_URL at the proxy below.
+        upstream = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com"
+        proxy = CountingProxy(upstream)
         saved_env_values = {
             "OPENAI_BASE_URL": proxy.base_url,
             "OPENAI_API_KEY": api_key,
