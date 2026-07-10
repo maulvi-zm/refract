@@ -39,6 +39,11 @@ class RefactorProposal:
     explanation: str
     edits: tuple[SnippetEdit, ...]
     confidence: float
+    # For an extract-constant fix the model supplies only the constant's name
+    # here (UPPER_SNAKE_CASE) and lets refract place the definition and rewrite
+    # the literal deterministically -- see refactoring/extract_constant.py. Empty
+    # for every other fix, where ``edits`` carries the whole change.
+    constant_name: str = ""
 
     @property
     def old_snippet(self) -> str:
@@ -69,6 +74,7 @@ class RefactorProposal:
             explanation=str(data["explanation"]),
             edits=edits,
             confidence=confidence,
+            constant_name=str(data.get("constant_name", "")),
         )
 
 

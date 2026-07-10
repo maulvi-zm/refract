@@ -177,6 +177,7 @@ def _proposal_schema() -> dict[str, Any]:
         "additionalProperties": False,
         "properties": {
             "explanation": {"type": "string"},
+            "constant_name": {"type": "string"},
             "edits": {
                 "type": "array",
                 "minItems": 1,
@@ -192,7 +193,7 @@ def _proposal_schema() -> dict[str, Any]:
             },
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         },
-        "required": ["explanation", "edits", "confidence"],
+        "required": ["explanation", "constant_name", "edits", "confidence"],
     }
 
 
