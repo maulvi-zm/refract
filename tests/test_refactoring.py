@@ -261,23 +261,31 @@ def _magic_index(source: Path) -> RepositoryIndex:
 
 def test_run_refactor_retries_with_feedback_then_applies(tmp_path: Path) -> None:
     source = tmp_path / "mod.py"
-    source.write_text("def target():\n    value = 42\n    return value\n", encoding="utf-8")
+    source.write_text(
+        "import os\n\n\ndef target():\n    value = 42\n    return value\n", encoding="utf-8"
+    )
+    index = RepositoryIndex(
+        methods=[MethodInfo("target", "<unknown>", source, 4, 6, 1)],
+        smells=[SmellLocation(SmellType.MAGIC_NUMBER, source, 5, "42", "magic")],
+    )
 
-    rejected = _proposal("value = 999", "value = LIMIT")  # 999 not in source -> rejected
-    valid = _proposal("value = 42", "value = LIMIT")
+    # attempt 1: no constant_name -> a magic number can't be extracted safely -> rejected
+    rejected = RefactorProposal(explanation="x", edits=(), confidence=0.9, constant_name="")
+    # attempt 2: the model supplies a name and Refract's deterministic extractor lands it
+    valid = RefactorProposal(explanation="x", edits=(), confidence=0.9, constant_name="LIMIT")
     provider = _QueueProvider([rejected, valid])
 
-    results = run_refactor(
-        _magic_index(source), tmp_path, SmellType.MAGIC_NUMBER, 1, provider, True
-    )
+    results = run_refactor(index, tmp_path, SmellType.MAGIC_NUMBER, 1, provider, True)
 
     assert provider.calls == 2  # first rejected, retried once
     assert len(results) == 1
     assert results[0].attempts == 2
-    assert "value = LIMIT" in source.read_text(encoding="utf-8")
+    text = source.read_text(encoding="utf-8")
+    assert "LIMIT = 42" in text  # constant hoisted to module scope
+    assert "value = LIMIT" in text  # use site rewritten (nothing else changed)
     # the retry prompt carried the rejection feedback back to the model
     assert "REJECTED" in provider.prompts[1]
-    assert "not found" in provider.prompts[1].lower()
+    assert "constant_name" in provider.prompts[1].lower()
 
 
 def test_run_refactor_gives_up_after_max_attempts_leaving_file_intact(tmp_path: Path) -> None:
@@ -342,6 +350,95 @@ def test_run_refactor_prefers_deterministic_constant_extraction(tmp_path: Path) 
     assert "os.read(0, BUFFER_SIZE)" in text
 
 
+def test_run_refactor_fixes_every_magic_number_in_a_file_despite_line_shift(
+    tmp_path: Path,
+) -> None:
+    # Two magic numbers in one file: fixing the first hoists a constant to the top,
+    # pushing the second literal down a line. The deterministic extractor is
+    # line-keyed, so without realigning the pending smell the second fix would fail
+    # to locate its literal and be skipped -- the "only the first per file" bug.
+    source = tmp_path / "mod.py"
+    source.write_text(
+        "import os\n\n\ndef target():\n    a = 42\n    b = 99\n    return a + b\n",
+        encoding="utf-8",
+    )
+    index = RepositoryIndex(
+        methods=[MethodInfo("target", "<unknown>", source, 4, 7, 1)],
+        smells=[
+            SmellLocation(SmellType.MAGIC_NUMBER, source, 5, "42", "magic"),
+            SmellLocation(SmellType.MAGIC_NUMBER, source, 6, "99", "magic"),
+        ],
+    )
+    provider = _QueueProvider(
+        [
+            RefactorProposal(explanation="x", edits=(), confidence=0.9, constant_name="FIRST"),
+            RefactorProposal(explanation="x", edits=(), confidence=0.9, constant_name="SECOND"),
+        ]
+    )
+
+    results = run_refactor(index, tmp_path, SmellType.MAGIC_NUMBER, 2, provider, True)
+
+    text = source.read_text(encoding="utf-8")
+    assert len(results) == 2  # both fixed, not just the first
+    assert "FIRST = 42" in text and "a = FIRST" in text
+    assert "SECOND = 99" in text and "b = SECOND" in text
+
+
+def _open_atomic_index(source: Path) -> RepositoryIndex:
+    return RepositoryIndex(
+        methods=[MethodInfo("target", "<unknown>", source, 4, 6, 1)],
+        smells=[SmellLocation(SmellType.MAGIC_NUMBER, source, 5, "42", "magic")],
+    )
+
+
+def test_test_gate_reverts_edit_that_regresses_the_suite(tmp_path: Path) -> None:
+    source = tmp_path / "mod.py"
+    original = "import os\n\n\ndef target():\n    value = 42\n    return value\n"
+    source.write_text(original, encoding="utf-8")
+    provider = _QueueProvider(
+        [RefactorProposal(explanation="x", edits=(), confidence=0.9, constant_name="LIMIT")]
+    )
+
+    # the edit applies cleanly (passes every static guard) but the behavioural
+    # gate reports a regression -> it must be rolled back and the target skipped.
+    results = run_refactor(
+        _open_atomic_index(source),
+        tmp_path,
+        SmellType.MAGIC_NUMBER,
+        1,
+        provider,
+        True,
+        verify_after=lambda: False,
+    )
+
+    assert results == []  # skipped, not counted as a fix
+    assert source.read_text(encoding="utf-8") == original  # do no harm: reverted exactly
+
+
+def test_test_gate_keeps_edit_when_suite_still_passes(tmp_path: Path) -> None:
+    source = tmp_path / "mod.py"
+    source.write_text(
+        "import os\n\n\ndef target():\n    value = 42\n    return value\n", encoding="utf-8"
+    )
+    provider = _QueueProvider(
+        [RefactorProposal(explanation="x", edits=(), confidence=0.9, constant_name="LIMIT")]
+    )
+
+    results = run_refactor(
+        _open_atomic_index(source),
+        tmp_path,
+        SmellType.MAGIC_NUMBER,
+        1,
+        provider,
+        True,
+        verify_after=lambda: True,
+    )
+
+    assert len(results) == 1  # gate passed -> fix kept
+    text = source.read_text(encoding="utf-8")
+    assert "LIMIT = 42" in text and "value = LIMIT" in text
+
+
 def test_build_repair_prompt_includes_error_and_failed_edit() -> None:
     from refract.refactoring.prompt import build_repair_prompt
 
@@ -354,11 +451,13 @@ def test_build_repair_prompt_includes_error_and_failed_edit() -> None:
 
 def test_pipeline_dry_run_uses_provider_without_writing(tmp_path: Path) -> None:
     source = tmp_path / "example.py"
-    source.write_text("def target():\n    value = 42\n    return value\n", encoding="utf-8")
+    source.write_text(
+        "import os\n\n\ndef target():\n    value = 42\n    return value\n", encoding="utf-8"
+    )
 
     index = RepositoryIndex(
-        methods=[MethodInfo("target", "<unknown>", source, 1, 3, 1)],
-        smells=[SmellLocation(SmellType.MAGIC_NUMBER, source, 2, "42", "magic")],
+        methods=[MethodInfo("target", "<unknown>", source, 4, 6, 1)],
+        smells=[SmellLocation(SmellType.MAGIC_NUMBER, source, 5, "42", "magic")],
     )
 
     captured: dict[str, str] = {}
@@ -369,11 +468,11 @@ def test_pipeline_dry_run_uses_provider_without_writing(tmp_path: Path) -> None:
         def propose(self, system_prompt: str, user_prompt: str) -> RefactorProposal:
             captured["system"] = system_prompt
             captured["user"] = user_prompt
-            return _proposal("value = 42", "value = LIMIT")
+            return RefactorProposal(explanation="x", edits=(), confidence=0.9, constant_name="LIMIT")
 
     results = run_refactor(index, tmp_path, SmellType.MAGIC_NUMBER, 1, FakeProvider(), apply=False)
 
     assert len(results) == 1
     assert "python refactoring assistant" in captured["system"]
     assert "Smell: magic_number" in captured["user"]
-    assert "value = 42" in source.read_text(encoding="utf-8")
+    assert "value = 42" in source.read_text(encoding="utf-8")  # dry run: nothing written

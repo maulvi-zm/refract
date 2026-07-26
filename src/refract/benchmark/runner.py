@@ -22,7 +22,7 @@ from refract.indexing.repository import index_repository, source_files
 from refract.languages.registry import spec_for_path
 from refract.refactoring.pipeline import run_refactor
 from refract.refactoring.providers import config_from_env, provider_from_config
-from refract.verification.runner import verify
+from refract.verification.runner import verify, verify_compiles
 
 # Agentic tools run a verify loop against `refract check`, so give them headroom.
 # 600s wasn't enough in practice -- gemini-cli hit it on 3/3 pilot runs while still
@@ -46,7 +46,7 @@ class ToolResult:
     # edited file, before/after. Unlike a target-only sum this counts helpers a
     # tool extracts (they're new methods in the same file), so extract-method
     # redistribution shows up honestly -- a pure move nets ~0, only a real
-    # simplification drops. See references/run1-refract-baseline.md §5.
+    # simplification drops. See references/README.md (findings).
     complexity_before: int = 0
     complexity_after: int = 0
     # Target methods that no longer exist after the refactor (renamed/removed);
@@ -137,6 +137,12 @@ class Baseline:
     tests_passed: bool | None
     test_command: str  # "auto", or a repo-specific override (e.g. a multi-module
     # Maven project where the generic `mvn test` pulls in unrelated submodules)
+    # Relative paths of every source file in the pristine copy. The after-analysis
+    # scores only these, so agent-created scratch files (codex leaves patch_*.py /
+    # old_file.py behind) can't inflate smells_after or syntax_broken_files.
+    # smells_before uses the same set, keeping before/after comparable. None
+    # disables scoping (repo-wide); the production path always sets it.
+    source_files: frozenset[Path] | None = None
 
 
 AGENTIC_TOOLS = ("codex", "opencode", "gemini")
@@ -155,6 +161,7 @@ def run_benchmark(
     codex_api_key_mode: bool = False,
     codex_base_url: str = "https://api.openai.com/v1",
     codex_api_key: str = "",
+    codex_model: str = "",
     gemini_model: str = _DEFAULT_GEMINI_MODEL,
     gemini_api_key: str = "",
     refract_provider: str = "openai",
@@ -181,6 +188,10 @@ def run_benchmark(
     calls from its JSONL turn.completed events instead. opencode and gemini both
     run natively on Gemini (gemini_model/gemini_api_key), each routed through its
     own counting proxy that forwards to Google's generativelanguage endpoint.
+
+    codex_model overrides the model id for codex only: its OpenRouter backend needs
+    a provider-prefixed id ("google/gemini-3.1-flash-lite") where every other tool
+    uses the bare name. Empty (default) reuses `model`.
 
     test_command overrides how the test suite is run, same syntax as `refract
     verify --test-command`. "auto" (default) detects mvn/gradle/pytest, which
@@ -215,23 +226,35 @@ def run_benchmark(
         raise ValueError(f"unknown benchmark tool(s): {', '.join(unknown)}")
 
     with _benchmark_workdir(workdir) as tmp_path:
+        run_refract = "refract" not in done
         refract_dir = tmp_path / "refract_copy"
-        _fresh_copytree(repo, refract_dir)
+        # refract_copy is both the pristine copy the shared baseline is measured on
+        # and refract's own working copy. If refract is resumed-as-done its edited
+        # copy must survive, so measure the baseline on a throwaway clone instead.
+        throwaway_baseline_dir: Path | None = None
+        if run_refract:
+            _fresh_copytree(repo, refract_dir)
+            baseline_dir = refract_dir
+        else:
+            throwaway_baseline_dir = tmp_path / "_baseline_copy"
+            _fresh_copytree(repo, throwaway_baseline_dir)
+            baseline_dir = throwaway_baseline_dir
 
-        initial_index = index_repository(refract_dir)
+        initial_index = index_repository(baseline_dir)
         flagged = initial_index.smells_by_type(smell_type)
         smells_before = len(flagged)  # repo-wide, uncapped: catches regressions too
         capped_flagged = _cap_flagged(flagged, limit)
         target_count = len(capped_flagged)
-        targets = _target_list(capped_flagged, refract_dir)
-        baseline_test_result = verify(refract_dir, test_command)
-        target_methods = _target_methods(initial_index, capped_flagged, refract_dir)
+        targets = _target_list(capped_flagged, baseline_dir)
+        baseline_test_result = verify(baseline_dir, test_command)
+        target_methods = _target_methods(initial_index, capped_flagged, baseline_dir)
         baseline = Baseline(
             target_methods=target_methods,
             file_complexity_before=_file_complexity(
-                initial_index, refract_dir, {t.file for t in target_methods}
+                initial_index, baseline_dir, {t.file for t in target_methods}
             ),
-            broken_files=_syntax_error_files(refract_dir),
+            broken_files=_syntax_error_files(baseline_dir),
+            source_files=_relative_source_files(baseline_dir),
             tests_passed=baseline_test_result.passed
             if baseline_test_result.command is not None
             else None,
@@ -241,10 +264,15 @@ def run_benchmark(
         # Independent oracle count on the pristine repo, shared across all tools
         # (they each start from an identical copy). None when no oracle is
         # configured -- see benchmark/oracle.py.
-        oracle_before = oracle_count_smells(refract_dir, smell_type)
+        oracle_before = oracle_count_smells(baseline_dir, smell_type)
+
+        # Done with the throwaway copy (index, baseline, oracle_before); drop it so
+        # --keep-workdir doesn't leave a copy mistakable for a tool's output.
+        if throwaway_baseline_dir is not None:
+            shutil.rmtree(throwaway_baseline_dir, ignore_errors=True)
 
         results: list[ToolResult] = []
-        if "refract" not in done:
+        if run_refract:
             refract_result = _run_refract(
                 refract_dir,
                 initial_index,
@@ -271,7 +299,7 @@ def run_benchmark(
                 result = _run_codex(
                     tool_dir,
                     smell_type,
-                    model,
+                    codex_model or model,
                     codex_api_key or api_key,
                     smells_before,
                     targets,
@@ -362,6 +390,26 @@ def _fresh_copytree(src: Path, dst: Path) -> None:
     if dst.exists():
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
+    _relink_editable_installs(src, dst)
+
+
+def _relink_editable_installs(src: Path, dst: Path) -> None:
+    """A copied venv's editable-install entries keep the original repo's absolute
+    source path, so ``import <pkg>`` in the copy resolves to the pristine original
+    and the test-gate passes no matter what the tool edited. Rewrite those paths
+    src -> dst. Covers both editable styles: ``.pth`` files and PEP 660
+    ``__editable__*.py`` finders."""
+    old, new = str(src.resolve()), str(dst.resolve())
+    if old == new:
+        return
+    for site_packages in dst.glob(".venv/lib/*/site-packages"):
+        for entry in (*site_packages.glob("*.pth"), *site_packages.glob("__editable__*.py")):
+            try:
+                text = entry.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if old in text:
+                entry.write_text(text.replace(old, new))
 
 
 def _file_complexity(
@@ -569,6 +617,45 @@ def _median(values: list[int]) -> float:
     return float(statistics.median(values)) if values else 0.0
 
 
+def _count_smells_in_baseline(
+    index: RepositoryIndex,
+    smell_type: SmellType,
+    repo_dir: Path,
+    baseline: Baseline,
+) -> int:
+    """Count post-refactor smells, but only in files that existed pristine.
+
+    Scoped to baseline.source_files so agent-created scratch files (e.g. a
+    long-method module copied to old_file.py) can't inflate smells_after.
+    smells_before uses the same set, so the delta stays honest. None disables the
+    scoping and every smell counts."""
+    smells = index.smells_by_type(smell_type)
+    if baseline.source_files is None:
+        return len(smells)
+    root = repo_dir.resolve()
+    count = 0
+    for smell in smells:
+        try:
+            rel = smell.file.resolve().relative_to(root)
+        except ValueError:
+            rel = smell.file
+        if rel in baseline.source_files:
+            count += 1
+    return count
+
+
+def _relative_source_files(repo_dir: Path) -> frozenset[Path]:
+    """Relative paths of every source file in the repo, for snapshotting the
+    pristine file set (see Baseline.source_files)."""
+    rels = set()
+    for path in source_files(repo_dir):
+        try:
+            rels.add(path.resolve().relative_to(repo_dir.resolve()))
+        except ValueError:
+            rels.add(path)
+    return frozenset(rels)
+
+
 def _syntax_error_files(repo_dir: Path) -> frozenset[Path]:
     """Relative paths of source files tree-sitter can't cleanly parse.
 
@@ -593,6 +680,31 @@ def _syntax_error_files(repo_dir: Path) -> frozenset[Path]:
     return frozenset(broken)
 
 
+def _test_gate(repo_dir: Path, baseline: Baseline) -> Callable[[], bool] | None:
+    """The behavioural revert-on-regression gate for refract's own run, or None.
+
+    Opt-in via ``REFRACT_TEST_GATE`` (a separate arm, off by default so the frozen
+    grid is unaffected), and only when the pristine baseline suite passed -- a repo
+    already red, or with no test command, has nothing to protect. Each call re-runs
+    the suite the benchmark scores with, so ``run_refactor`` can roll back a
+    regressing edit.
+    """
+    if os.getenv("REFRACT_TEST_GATE", "") in ("", "0", "false", "False"):
+        return None
+    if not baseline.tests_passed:
+        return None
+
+    def gate() -> bool:
+        # Tier 1 -- compile-only pre-filter (Java/Gradle): catches a non-compiling
+        # edit in seconds. None means no compile phase (Python), so fall through.
+        if verify_compiles(repo_dir, baseline.test_command) is False:
+            return False
+        # Tier 2 -- full suite: catches behaviour changes that still compile.
+        return verify(repo_dir, baseline.test_command).passed
+
+    return gate
+
+
 def _run_refract(
     repo_dir: Path,
     initial_index: RepositoryIndex,
@@ -607,8 +719,9 @@ def _run_refract(
 ) -> ToolResult:
     # point refract at the proxy, which forwards to the real upstream so calls
     # get counted regardless of which provider is backing this run
+    proxy_log = repo_dir.parent / "refract_proxy.jsonl"
     if provider_name == "gemini":
-        proxy = CountingProxy("https://generativelanguage.googleapis.com")
+        proxy = CountingProxy("https://generativelanguage.googleapis.com", log_path=proxy_log)
         saved_env_values = {
             "GEMINI_BASE_URL": proxy.base_url,
             "GEMINI_API_KEY": api_key,
@@ -620,7 +733,7 @@ def _run_refract(
         # the real upstream, so the proxy forwards there instead of api.openai.com;
         # captured before we point OPENAI_BASE_URL at the proxy below.
         upstream = os.getenv("OPENAI_BASE_URL") or "https://api.openai.com"
-        proxy = CountingProxy(upstream)
+        proxy = CountingProxy(upstream, log_path=proxy_log)
         saved_env_values = {
             "OPENAI_BASE_URL": proxy.base_url,
             "OPENAI_API_KEY": api_key,
@@ -642,6 +755,7 @@ def _run_refract(
             provider=provider,
             apply=True,
             max_attempts=max_attempts,
+            verify_after=_test_gate(repo_dir, baseline),
         )
     except Exception as exc:  # noqa: BLE001 - report any failure in the result
         error = str(exc)
@@ -773,9 +887,10 @@ def _run_codex_api_key_mode(
     verbose: bool,
 ) -> ToolResult:
     # codex tacks /responses onto base_url, so it must already end in /v1.
-    # Point this at CCX (e.g. http://localhost:3000/v1) instead of real OpenAI
-    # to put codex on the same model as everything else without an OpenAI key.
-    proxy = CountingProxy(base_url)
+    # Point this at OpenRouter (https://openrouter.ai/api/v1) instead of real
+    # OpenAI to put codex on the same model as everything else without an
+    # OpenAI key.
+    proxy = CountingProxy(base_url, log_path=repo_dir.parent / "codex_proxy.jsonl")
     proxy.start()
 
     error = ""
@@ -795,6 +910,20 @@ def _run_codex_api_key_mode(
             "model_providers.openai-direct.env_key=OPENAI_API_KEY",
             "-c",
             "model_providers.openai-direct.wire_api=responses",
+            # gemini-3.1-flash-lite is an unrecognized model family to codex, so it
+            # falls back to the argv-array `shell` tool (execvp, no shell parsing).
+            # The model never wraps commands as ["bash","-lc",...] as that tool
+            # requires, so every command fails with ENOENT. unified_exec swaps in a
+            # plain-string exec_command tool codex runs through a real shell.
+            # See references/codex-openrouter-gemini-tool-calling.md.
+            "-c",
+            "experimental_use_unified_exec_tool=true",
+            # Same fallout: no apply_patch tool is registered, so the model's
+            # apply_patch calls are rejected ("unsupported call: apply_patch") and
+            # it edits via sed/heredoc hacks that broke source or self-reverted,
+            # landing 0 clean fixes. This registers the editor it already wants.
+            "-c",
+            "experimental_use_freeform_apply_patch=true",
             "-m",
             model,
             "--dangerously-bypass-approvals-and-sandbox",
@@ -944,7 +1073,10 @@ def _run_opencode(
             "opencode", model, smells_before, baseline, "GEMINI_API_KEY is not set"
         )
 
-    proxy = CountingProxy("https://generativelanguage.googleapis.com")
+    proxy = CountingProxy(
+        "https://generativelanguage.googleapis.com",
+        log_path=repo_dir.parent / "opencode_proxy.jsonl",
+    )
     proxy.start()
 
     # @ai-sdk/google builds request URLs as `{baseURL}/models/{model}:generate...`
@@ -1064,7 +1196,10 @@ def _run_gemini(
             "gemini", model, smells_before, baseline, "GEMINI_API_KEY is not set"
         )
 
-    proxy = CountingProxy("https://generativelanguage.googleapis.com")
+    proxy = CountingProxy(
+        "https://generativelanguage.googleapis.com",
+        log_path=repo_dir.parent / "gemini_proxy.jsonl",
+    )
     proxy.start()
     isolated_home = tempfile.mkdtemp(prefix="refract_gemini_home_")
 
@@ -1266,10 +1401,15 @@ def _analyze_after(
         )
 
     tests_passed = test_result.passed if test_result.command is not None else None
-    smells_after = len(after_index.smells_by_type(smell_type))
+    smells_after = _count_smells_in_baseline(after_index, smell_type, repo_dir, baseline)
     complexity = _complexity_after(after_index, repo_dir, baseline)
 
-    newly_broken = _syntax_error_files(repo_dir) - baseline.broken_files
+    # Only blame the tool for breaking pristine files -- a broken scratch file it
+    # created itself is not a regression of the repo under test.
+    broken_now = _syntax_error_files(repo_dir)
+    if baseline.source_files is not None:
+        broken_now &= baseline.source_files
+    newly_broken = broken_now - baseline.broken_files
     if newly_broken and not error:
         broken_list = ", ".join(str(p) for p in sorted(newly_broken))
         error = f"syntax error introduced in: {broken_list}"

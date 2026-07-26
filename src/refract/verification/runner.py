@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -75,6 +76,35 @@ def parse_test_command(repo_root: Path, command: str) -> list[str] | None:
     return command.split()
 
 
+def _compile_only_command(command: list[str]) -> list[str] | None:
+    """A cheap "does it still compile?" variant of ``command``, or None when the
+    toolchain has no separate compile phase (Python -- pytest compiles nothing).
+
+    Tier 1 of the two-tier behavioural gate: a Java edit that won't compile (a
+    hallucinated import, a wrong inferred type, a severed reference) is caught in
+    seconds without running the suite. Maven's ``test`` becomes ``test-compile``,
+    Gradle's becomes ``testClasses``; other args (``-pl gson -am``) are kept."""
+    if not command:
+        return None
+    exe = Path(command[0]).name
+    if exe.startswith("mvn"):
+        return [command[0]] + ["test-compile" if a == "test" else a for a in command[1:]]
+    if exe.startswith("gradle"):
+        return [command[0]] + ["testClasses" if a == "test" else a for a in command[1:]]
+    return None  # pytest / unittest / unknown: no separate compile step
+
+
+def verify_compiles(repo_root: Path, test_command: str = "auto") -> bool | None:
+    """Whether the repo still compiles, via the compile-only phase of its test
+    command. None when the toolchain has no compile phase (Python), so the caller
+    should fall through to ``verify``."""
+    command = parse_test_command(repo_root, command=test_command)
+    compile_cmd = _compile_only_command(command) if command else None
+    if compile_cmd is None:
+        return None
+    return _run_tests(repo_root, compile_cmd).returncode == 0
+
+
 def verify(repo_root: Path, test_command: str = "auto") -> VerificationResult:
     command = parse_test_command(repo_root, command=test_command)
     completed = _run_tests(repo_root, command)
@@ -86,6 +116,27 @@ def verify(repo_root: Path, test_command: str = "auto") -> VerificationResult:
         stderr=completed.stderr,
         index=index_repository(repo_root),
     )
+
+
+def _test_env(repo_root: Path) -> dict[str, str]:
+    """Force the repo copy's own source onto PYTHONPATH ahead of everything else.
+
+    The benchmark copies each repo with ``copytree``, but a uv venv is not
+    relocatable: the copy's console scripts keep an absolute shebang to the
+    original venv's python, whose editable-install .pth injects the original source
+    into sys.path -- so the test-gate would pass no matter what the tool edited.
+    PYTHONPATH precedes site-packages .pth additions, so prepending the copy's roots
+    makes the edited source win. Harmless for non-Python repos."""
+    env = os.environ.copy()
+    roots = [str(repo_root)]
+    src = repo_root / "src"
+    if src.is_dir():
+        roots.insert(0, str(src))  # src-layout: the package lives under src/
+    existing = env.get("PYTHONPATH")
+    if existing:
+        roots.append(existing)
+    env["PYTHONPATH"] = os.pathsep.join(roots)
+    return env
 
 
 def _run_tests(repo_root: Path, command: list[str] | None) -> subprocess.CompletedProcess[str]:
@@ -100,6 +151,7 @@ def _run_tests(repo_root: Path, command: list[str] | None) -> subprocess.Complet
             capture_output=True,
             text=True,
             timeout=_TEST_TIMEOUT_SECONDS,
+            env=_test_env(repo_root),
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(

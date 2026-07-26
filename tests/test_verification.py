@@ -1,6 +1,10 @@
 from pathlib import Path
 
-from refract.verification.runner import detect_test_command, parse_test_command
+from refract.verification.runner import (
+    _compile_only_command,
+    detect_test_command,
+    parse_test_command,
+)
 
 
 def test_detects_maven_wrapper_first(tmp_path: Path) -> None:
@@ -36,3 +40,29 @@ def test_prefers_repo_local_venv_pytest(tmp_path: Path) -> None:
 
 def test_parse_explicit_command_splits_words(tmp_path: Path) -> None:
     assert parse_test_command(tmp_path, "pytest -q") == ["pytest", "-q"]
+
+
+def test_compile_only_maps_maven_test_to_test_compile_keeping_args() -> None:
+    assert _compile_only_command(["mvn", "test"]) == ["mvn", "test-compile"]
+    # gson's reactor args must survive the rewrite
+    assert _compile_only_command(["mvn", "test", "-pl", "gson", "-am"]) == [
+        "mvn",
+        "test-compile",
+        "-pl",
+        "gson",
+        "-am",
+    ]
+    assert _compile_only_command(["/repo/mvnw", "test"]) == ["/repo/mvnw", "test-compile"]
+
+
+def test_compile_only_maps_gradle_test_to_test_classes() -> None:
+    assert _compile_only_command(["gradle", "test"]) == ["gradle", "testClasses"]
+    assert _compile_only_command(["/repo/gradlew", "test"]) == ["/repo/gradlew", "testClasses"]
+
+
+def test_compile_only_is_none_for_python_or_unknown() -> None:
+    # pytest / unittest compile nothing -> no cheap tier; gate falls through to verify()
+    assert _compile_only_command(["pytest"]) is None
+    assert _compile_only_command(["pytest", "--benchmark-disable"]) is None
+    assert _compile_only_command(["python", "-m", "unittest", "discover"]) is None
+    assert _compile_only_command([]) is None

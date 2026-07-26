@@ -124,6 +124,9 @@ PYTHON = LanguageSpec(
             (match_statement)
         ] @statement
     """,
+    # Thresholds anchored to the Designite defaults (the oracle): longMethod=20,
+    # longIdentifier=17. We count statements (NCSS) where Designite counts LOC --
+    # same threshold, different unit; a documented detector/oracle divergence.
     long_method_threshold=20,
     declaration_query="""
         (assignment left: (identifier) @decl.name)
@@ -132,7 +135,7 @@ PYTHON = LanguageSpec(
         (typed_parameter (identifier) @decl.name)
         (typed_default_parameter name: (identifier) @decl.name)
     """,
-    long_identifier_threshold=20,
+    long_identifier_threshold=17,  # Designite default (was 20); matches Java + DPy
     number_query="[(integer) (float)] @number",
     ignored_numbers=frozenset({"0", "1", "2"}),
     is_constant_definition=_is_constant_definition,

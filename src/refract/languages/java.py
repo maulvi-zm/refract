@@ -157,12 +157,15 @@ JAVA = LanguageSpec(
             (labeled_statement)
         ] @statement
     """,
+    # Thresholds anchored to DesigniteJava's compiled defaults (ThresholdsDTO):
+    # longMethod=20, longIdentifier=17. It is the non-configurable oracle, so its
+    # defaults are authoritative.
     long_method_threshold=20,
     declaration_query="""
         (variable_declarator name: (identifier) @decl.name)
         (formal_parameter name: (identifier) @decl.name)
     """,
-    long_identifier_threshold=17,
+    long_identifier_threshold=17,  # DesigniteJava default
     number_query="""
         [
             (decimal_integer_literal)

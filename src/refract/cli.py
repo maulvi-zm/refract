@@ -110,7 +110,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Provider backing refract's own baseline run. 'gemini' interprets "
         "--model/the provider key as Gemini instead of OpenAI, so the whole "
         "run can go through a single Gemini key (see "
-        "references/gemini-provider-setup.md for the full same-model setup "
+        "references/README.md for the full same-model setup "
         "across all four tools). Default: openai.",
     )
     bench_parser.add_argument(

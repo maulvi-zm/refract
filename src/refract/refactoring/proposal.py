@@ -27,7 +27,7 @@ class SnippetEdit:
     helper *plus* replaces the block with a call; rename-identifier touches every
     occurrence. Expressing each as its own edit is what lets those land as valid
     code instead of being crammed into one contiguous snippet (the Run 1 failure
-    mode -- see references/run1-refract-baseline.md §4a).
+    mode -- see references/README.md (findings)).
     """
 
     old_snippet: str

@@ -249,6 +249,61 @@ def test_analyze_after_ignores_preexisting_syntax_error(tmp_path: Path) -> None:
     assert analysis.error == ""
 
 
+def _long_method_src(name: str) -> str:
+    body = "\n".join(f"    x{i} = {i}" for i in range(25))  # 25 statements > threshold 20
+    return f"def {name}():\n{body}\n"
+
+
+def test_analyze_after_scopes_smells_to_baseline_source_files(tmp_path: Path) -> None:
+    # A pristine file whose long method the tool left unfixed, plus a scratch
+    # file the tool created that ALSO has a long method. Only the pristine one
+    # should count -- the scratch file is the tool's own litter.
+    (tmp_path / "mod.py").write_text(_long_method_src("real"), encoding="utf-8")
+    (tmp_path / "scratch_copy.py").write_text(_long_method_src("junk"), encoding="utf-8")
+    baseline = Baseline(
+        target_methods=[],
+        file_complexity_before={},
+        broken_files=frozenset(),
+        tests_passed=None,
+        test_command="auto",
+        source_files=frozenset({Path("mod.py")}),
+    )
+
+    analysis = _analyze_after(tmp_path, SmellType.LONG_METHOD, 1, baseline, "")
+
+    assert analysis.smells_after == 1  # scratch_copy.py's long method is excluded
+
+    # Sanity: with scoping disabled (None), the scratch file inflates the count.
+    baseline_unscoped = Baseline(
+        target_methods=[],
+        file_complexity_before={},
+        broken_files=frozenset(),
+        tests_passed=None,
+        test_command="auto",
+    )
+    analysis_unscoped = _analyze_after(tmp_path, SmellType.LONG_METHOD, 1, baseline_unscoped, "")
+    assert analysis_unscoped.smells_after == 2
+
+
+def test_analyze_after_ignores_syntax_error_in_scratch_file(tmp_path: Path) -> None:
+    (tmp_path / "mod.py").write_text("def target():\n    return 1\n", encoding="utf-8")
+    # tool leaves a broken scratch file it created, but never touched mod.py
+    (tmp_path / "patch_helper.py").write_text("def broken(:\n    return 1\n", encoding="utf-8")
+    baseline = Baseline(
+        target_methods=[],
+        file_complexity_before={},
+        broken_files=frozenset(),
+        tests_passed=None,
+        test_command="auto",
+        source_files=frozenset({Path("mod.py")}),
+    )
+
+    analysis = _analyze_after(tmp_path, SmellType.LONG_METHOD, 0, baseline, "")
+
+    assert analysis.syntax_broken_files == 0  # scratch file's breakage isn't the repo's
+    assert analysis.error == ""
+
+
 def _fake_verification(passed: bool | None, index: RepositoryIndex) -> VerificationResult:
     if passed is None:
         return VerificationResult(command=None, returncode=0, stdout="", stderr="", index=index)
@@ -513,6 +568,41 @@ def test_run_benchmark_keeps_workdir_when_requested(tmp_path, monkeypatch) -> No
 
     # the patched copy survives the run instead of being cleaned up
     assert (workdir / "refract_copy" / "m.py").exists()
+
+
+def test_rerun_for_other_tool_preserves_done_refract_copy(tmp_path, monkeypatch) -> None:
+    """Regression: resuming a cell for another tool (refract already done) must
+    not clobber the saved refract_copy. The old code re-cloned refract_copy
+    unconditionally before the done check, wiping refract's patched output."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "m.py").write_text("def f():\n    return 42\n")
+
+    monkeypatch.setattr("refract.benchmark.runner.oracle_count_smells", lambda *a, **k: None)
+    monkeypatch.setattr("refract.benchmark.runner._run_codex", _fake_tool_runner("codex"))
+
+    # simulate a prior run: refract already produced a patched copy
+    workdir = tmp_path / "kept"
+    refract_copy = workdir / "refract_copy"
+    refract_copy.mkdir(parents=True)
+    (refract_copy / "m.py").write_text("def f():\n    return SHIFT  # refract edit\n")
+
+    run_benchmark(
+        repo=repo,
+        smell_type=SmellType.MAGIC_NUMBER,
+        model="m",
+        api_key="k",
+        tools=["codex"],
+        gemini_api_key="k",
+        refract_provider="gemini",
+        done_tools={"refract"},
+        workdir=workdir,
+    )
+
+    # refract's patched output is untouched, and the throwaway baseline copy is
+    # not left behind
+    assert (refract_copy / "m.py").read_text() == "def f():\n    return SHIFT  # refract edit\n"
+    assert not (workdir / "_baseline_copy").exists()
 
 
 def test_clean_subprocess_stderr_drops_node_noise_keeps_real_errors() -> None:
