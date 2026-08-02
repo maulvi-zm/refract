@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
 import socketserver
 import threading
 import time
@@ -29,6 +30,16 @@ class ProxyStats:
         self._log_path = log_path
         if log_path is not None:
             log_path.write_text("")
+        # Opt-in capture of the *request* side. The token log above shows input
+        # tokens climbing call after call, but not why; the request body carries
+        # the actual conversation the tool replays each turn, which is the thing
+        # that grows. Off by default: these files are large and hold source code.
+        self._req_path: Path | None = None
+        if log_path is not None and os.environ.get("REFRACT_PROXY_CAPTURE_BODIES"):
+            self._req_path = log_path.with_name(
+                log_path.name.replace("_proxy.jsonl", "_requests.jsonl")
+            )
+            self._req_path.write_text("")
 
     @staticmethod
     def _redact(path: str) -> str:
@@ -97,6 +108,50 @@ class ProxyStats:
             self.api_calls += 1
             self.failed_calls += 1
             self._log({"call": self.api_calls, "ok": False, "path": path, "status": status})
+
+    def record_request(self, body: bytes, path: str = "") -> None:
+        """Log the outgoing conversation for one call, when body capture is on.
+
+        Written before the response comes back, so this call's number is one
+        past api_calls. Keeps the whole body plus a per-turn digest, so the
+        transcript can be read directly and the growth can be charted without
+        re-parsing megabytes of JSON."""
+        if self._req_path is None:
+            return
+        text = body.decode("utf-8", errors="replace")
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+        turns: list[dict] = []
+        if isinstance(data, dict):
+            # OpenAI Chat Completions uses "messages", the Responses API uses
+            # "input", Gemini uses "contents" -- all are the replayed history.
+            raw = data.get("messages") or data.get("input") or data.get("contents") or []
+            if isinstance(raw, list):
+                for turn in raw:
+                    if not isinstance(turn, dict):
+                        continue
+                    turns.append(
+                        {
+                            "role": turn.get("role"),
+                            "chars": len(json.dumps(turn, ensure_ascii=False)),
+                        }
+                    )
+        with self._lock:
+            record = {
+                "call": self.api_calls + 1,
+                "path": self._redact(path),
+                "body_bytes": len(body),
+                "turns": len(turns),
+                "turn_digest": turns,
+                "body": data if data is not None else text,
+            }
+        try:
+            with self._req_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass  # never let audit logging break a run
 
     def _stream_usage(self, text: str) -> dict:
         # SSE stream: keep the last usage object seen. OpenAI emits it once on the
@@ -202,6 +257,7 @@ def _make_handler(stats: ProxyStats, upstream: str) -> type:
 
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length else b""
+            stats.record_request(body, self.path)
 
             target_url = upstream.rstrip("/") + self.path
             fwd_headers = {k: v for k, v in self.headers.items() if k.lower() != "host"}

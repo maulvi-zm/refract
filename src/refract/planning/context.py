@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from refract.core.models import MethodInfo, RepositoryIndex, SmellLocation, SmellType
+from refract.indexing.parser import parse
 from refract.languages.registry import spec_for_path
 
 
@@ -46,7 +47,16 @@ def build_contexts(
 def build_context(index: RepositoryIndex, smell: SmellLocation) -> RefactorContext:
     methods = sorted(index.methods_by_file(smell.file), key=lambda m: m.start_line)
     target = _containing_method(methods, smell)
-    snippet, start_line = _snippet_for(smell.file, smell.line, target)
+
+    # A rename must cover EVERY occurrence, so the snippet has to show them all --
+    # see _snippet_for.
+    must_cover = (
+        _identifier_lines(smell.file, smell.identifier)
+        if smell.smell is SmellType.LONG_IDENTIFIER
+        else ()
+    )
+
+    snippet, start_line = _snippet_for(smell.file, smell.line, target, must_cover=must_cover)
     header = _file_header(smell.file, start_line)
 
     return RefactorContext(
@@ -68,6 +78,7 @@ def _containing_method(methods: list[MethodInfo], smell: SmellLocation) -> Metho
         # innermost method for nested definitions
         return min(containing, key=lambda m: m.end_line - m.start_line)
 
+    # for long method
     by_identifier = [m for m in methods if m.name == smell.identifier]
     return by_identifier[0] if by_identifier else None
 
@@ -77,7 +88,21 @@ def _snippet_for(
     smell_line: int,
     target: MethodInfo | None,
     radius: int = 20,
+    must_cover: tuple[int, ...] = (),
+    padding: int = 3,
 ) -> tuple[str, int]:
+    """The source region to show the model, and the file line it starts at.
+
+    Base region: the containing method's body, or ``smell_line +/- radius`` when the
+    smell sits outside any method (a class-level field).
+
+    ``must_cover`` widens that region until it spans those lines. A long-identifier
+    fix has to rename every occurrence -- and the patcher rejects the patch if one
+    survives -- so a use site the model was never shown is an unfixable target, not
+    a bad answer. That is exactly what a hoisted constant hits: the definition
+    stacks at the top of the class while its uses stay put in a method further
+    down, easily more than ``radius`` lines away.
+    """
     lines = file_path.read_text(encoding="utf-8").splitlines()
 
     if target:
@@ -87,7 +112,40 @@ def _snippet_for(
         start = max(smell_line - radius, 1)
         end = min(smell_line + radius, len(lines))
 
+    if must_cover:
+        start = min(start, min(must_cover) - padding)
+        end = max(end, max(must_cover) + padding)
+
+    start = max(start, 1)
+    end = min(end, len(lines))
+
     return "\n".join(lines[start - 1 : end]), start
+
+
+def _identifier_lines(file_path: Path, identifier: str) -> tuple[int, ...]:
+    """1-based lines carrying ``identifier`` as an identifier token.
+
+    Matches on tokens rather than raw text so occurrences inside strings and
+    comments are ignored -- the same rule ``_reject_if_identifier_remains`` applies
+    when it decides a rename was complete. Empty when the language is unknown, in
+    which case the caller keeps its default window.
+    """
+    spec = spec_for_path(file_path)
+    if spec is None:
+        return ()
+
+    data = file_path.read_bytes()
+    target = identifier.encode("utf-8")
+
+    lines: set[int] = set()
+    stack = [parse(data, spec.language)]
+    while stack:
+        node = stack.pop()
+        if node.type == "identifier" and data[node.start_byte : node.end_byte] == target:
+            lines.add(node.start_point[0] + 1)
+        stack.extend(node.children)
+
+    return tuple(sorted(lines))
 
 
 def _file_header(file_path: Path, snippet_start_line: int, max_lines: int = 30) -> str:
