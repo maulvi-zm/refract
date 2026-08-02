@@ -15,9 +15,5 @@ def spec_for_path(path: Path) -> LanguageSpec | None:
     return _BY_EXTENSION.get(path.suffix)
 
 
-def supported_extensions() -> frozenset[str]:
-    return frozenset(_BY_EXTENSION)
-
-
 def all_specs() -> tuple[LanguageSpec, ...]:
     return _SPECS

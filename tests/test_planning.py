@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from refract.core.models import MethodInfo, RepositoryIndex, SmellLocation, SmellType
-from refract.planning.context import build_contexts
+from refract.planning.context import build_context
 
 SOURCE = """\
 public class Example {
@@ -29,10 +29,8 @@ def test_build_context_finds_target_callers_callees_constants(tmp_path: Path) ->
         smells=[SmellLocation(SmellType.MAGIC_NUMBER, source, 5, "42", "magic")],
     )
 
-    contexts = build_contexts(index, SmellType.MAGIC_NUMBER, limit=1)
+    context = build_context(index, index.smells[0])
 
-    assert len(contexts) == 1
-    context = contexts[0]
     assert context.target_method is not None
     assert context.target_method.name == "target"
     assert [m.name for m in context.callers] == ["caller"]

@@ -18,13 +18,5 @@ def matches(query: Query, node: Node) -> list[dict[str, list[Node]]]:
     return [captures for _, captures in QueryCursor(query).matches(node)]
 
 
-def captures(query: Query, node: Node) -> dict[str, list[Node]]:
-    result: dict[str, list[Node]] = {}
-    for match in matches(query, node):
-        for name, nodes in match.items():
-            result.setdefault(name, []).extend(nodes)
-    return result
-
-
 def node_text(node: Node, source: bytes) -> str:
     return source[node.start_byte : node.end_byte].decode("utf-8")

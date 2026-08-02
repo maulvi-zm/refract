@@ -25,24 +25,6 @@ class RefactorContext:
         spec = spec_for_path(self.smell.file)
         return spec.fence if spec else ""
 
-    def relative_file(self, repo_root: Path) -> str:
-        try:
-            return str(self.smell.file.relative_to(repo_root))
-        except ValueError:
-            return str(self.smell.file)
-
-
-def build_contexts(
-    index: RepositoryIndex,
-    smell_type: SmellType,
-    limit: int = 1,
-) -> list[RefactorContext]:
-    smells = sorted(
-        index.smells_by_type(smell_type),
-        key=lambda smell: (str(smell.file), smell.line, smell.identifier),
-    )
-    return [build_context(index, smell) for smell in smells[: max(limit, 0)]]
-
 
 def build_context(index: RepositoryIndex, smell: SmellLocation) -> RefactorContext:
     methods = sorted(index.methods_by_file(smell.file), key=lambda m: m.start_line)
