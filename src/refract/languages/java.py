@@ -12,7 +12,7 @@ _LANGUAGE = Language(tree_sitter_java.language())
 
 
 def _is_constant_definition(number: Node, source: bytes) -> bool:
-    # true if the number sits in a `static final` field
+    # true when the number sits inside a `static final` field
     current = number.parent
 
     while current is not None:

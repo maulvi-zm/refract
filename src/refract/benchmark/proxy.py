@@ -25,8 +25,7 @@ class ProxyStats:
                 self._record_json(text)
 
     def _record_stream(self, text: str) -> None:
-        # SSE stream: hunt the data lines for a usage object. Chat Completions
-        # keeps it on the chunk, the Responses API tucks it under chunk.response.
+        # usage sits on the chunk or under chunk.response, depending on the API
         for line in text.splitlines():
             if not line.startswith("data:"):
                 continue
@@ -56,7 +55,7 @@ class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
 
-# canned model list so codex's GET /models check passes without a real call
+# canned so codex's GET /models startup check passes without an upstream call
 _MODELS_RESPONSE = json.dumps(
     {
         "models": [
@@ -115,7 +114,7 @@ def _make_handler(stats: ProxyStats, upstream: str) -> type:
             self._forward("GET")
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-            pass  # quiet down the per-request logging
+            pass  # silence the per-request logging
 
     return _Handler
 

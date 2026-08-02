@@ -12,7 +12,7 @@ _LANGUAGE = Language(tree_sitter_python.language())
 
 
 def _is_constant_definition(number: Node, source: bytes) -> bool:
-    # true if the number is assigned to an ALL_CAPS name
+    # true when the number is assigned to an ALL_CAPS name
     current = number.parent
 
     while current is not None:

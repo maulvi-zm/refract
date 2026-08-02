@@ -23,7 +23,7 @@ def print_report(results: list[ToolResult]) -> None:
         ]
         for r in results
     ]
-    # widen each column to fit its header and its values
+    # each column is as wide as its header or its widest value
     widths = [max(len(h), *(len(row[i]) for row in rows)) for i, h in enumerate(_HEADERS)]
 
     def render(cells: list[str]) -> str:

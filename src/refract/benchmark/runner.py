@@ -44,11 +44,10 @@ def run_benchmark(
     codex_api_key_mode: bool = False,
     verbose: bool = False,
 ) -> list[ToolResult]:
-    """Each tool gets its own copy of the repo so they don't step on each other.
+    """Run each tool on its own copy of the repo.
 
-    codex_api_key_mode True routes codex through the proxy with the OpenAI key
-    (needs a verified org). False lets codex use its ChatGPT auth and we count
-    calls from its JSONL turn.completed events instead.
+    codex_api_key_mode routes codex through the proxy; otherwise it uses its
+    own ChatGPT auth and calls are counted from its JSONL output.
     """
     with tempfile.TemporaryDirectory(prefix="refract_bench_") as tmp:
         tmp_path = Path(tmp)
@@ -79,7 +78,7 @@ def _run_refract(
     limit: int,
     smells_before: int,
 ) -> ToolResult:
-    # point refract at the proxy, which forwards to the real openai endpoint
+    # refract talks to the proxy, which counts usage and forwards to OpenAI
     proxy = CountingProxy("https://api.openai.com")
     proxy.start()
 
@@ -173,7 +172,7 @@ def _run_codex_api_key_mode(
     prompt: str,
     verbose: bool,
 ) -> ToolResult:
-    # codex tacks /responses onto base_url, so upstream ends in /v1
+    # codex appends /responses to base_url, so the upstream must end in /v1
     proxy = CountingProxy("https://api.openai.com/v1")
     proxy.start()
 
@@ -244,7 +243,7 @@ def _run_codex_chatgpt_mode(
     prompt: str,
     verbose: bool,
 ) -> ToolResult:
-    # one turn.completed event in the JSONL output = one inference call
+    # no proxy here: each turn.completed event in the JSONL output is one call
     api_calls = input_tokens = output_tokens = 0
     error = ""
     exit_code = 0

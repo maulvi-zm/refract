@@ -64,7 +64,7 @@ def _enclosing_class(node: Node, source: bytes, spec: LanguageSpec) -> str:
 
 
 def _cyclomatic_complexity(body: Node, source: bytes, spec: LanguageSpec) -> int:
-    # McCabe: 1 + one per decision point
+    # McCabe: 1 plus one per decision point
     count = 1
     stack = [body]
 
