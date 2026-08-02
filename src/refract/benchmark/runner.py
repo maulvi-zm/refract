@@ -982,7 +982,7 @@ def _run_codex_chatgpt_mode(
     prompt: str,
     verbose: bool,
 ) -> ToolResult:
-    # one turn.completed event in the JSONL output = one inference call
+    # no proxy here: each turn.completed event in the JSONL output is one call
     api_calls = input_tokens = output_tokens = 0
     error = ""
     exit_code = 0

@@ -47,7 +47,7 @@ def in_scope(rel_path: Path) -> bool:
 
 
 def source_files(root: Path) -> list[Path]:
-    # absolute + sorted: stable order, and no path guessing downstream
+    # absolute and sorted: stable order, no path guessing downstream
     root = root.resolve()
     return [
         path

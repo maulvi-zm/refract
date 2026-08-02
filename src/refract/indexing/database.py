@@ -98,7 +98,7 @@ def load(db_path: Path) -> RepositoryIndex:
         calls = _grouped(conn, "method_calls", "callee")
         parameters = _grouped(conn, "method_parameters", "parameter")
 
-        # insertion order matters for name resolution
+        # ordered by id so the loaded index matches the order it was saved in
         methods = [
             MethodInfo(
                 name=row["name"],

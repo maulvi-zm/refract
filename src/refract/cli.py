@@ -286,7 +286,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> None:
     if not api_key:
         raise SystemExit(f"{baseline_key_env} is not set.")
 
-    # import here so the cli still loads without the benchmark bits
+    # imported lazily so the CLI loads without the benchmark dependencies
     from refract.benchmark.report import print_report
     from refract.benchmark.runner import AGENTIC_TOOLS, run_benchmark
 

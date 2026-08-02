@@ -109,7 +109,7 @@ class RefactorProvider(Protocol):
     def propose(self, system_prompt: str, user_prompt: str) -> RefactorProposal: ...
 
 
-# placeholder bodies to reject instead of applying
+# a new_snippet containing any of these is a stub, not a refactoring
 _STUB_PATTERNS = (
     "// implement",
     "// todo",

@@ -75,7 +75,7 @@ def build_context(index: RepositoryIndex, smell: SmellLocation) -> RefactorConte
 def _containing_method(methods: list[MethodInfo], smell: SmellLocation) -> MethodInfo | None:
     containing = [m for m in methods if m.start_line <= smell.line <= m.end_line]
     if containing:
-        # innermost method for nested definitions
+        # smallest range wins, so nested definitions resolve to the innermost one
         return min(containing, key=lambda m: m.end_line - m.start_line)
 
     # for long method
@@ -200,7 +200,7 @@ def _callees(index: RepositoryIndex, target: MethodInfo | None) -> list[MethodIn
         candidates = by_name.get(name, [])
         if not candidates:
             continue
-        # disambiguate by class when the name is not unique
+        # calls are unresolved names, so prefer a match in the same class
         same_class = [m for m in candidates if m.class_name == target.class_name]
         result.append(same_class[0] if same_class else candidates[0])
 

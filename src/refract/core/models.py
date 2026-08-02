@@ -33,11 +33,7 @@ class MethodInfo:
 
 @dataclass
 class SmellLocation:
-    """A detected smell.
-
-    `identifier` is the method name (long_method), the name (long_identifier),
-    or the literal such as "42" (magic_number). `detail` is the LLM message.
-    """
+    """A detected smell. `identifier` is the method name, declared name, or literal."""
 
     smell: SmellType
     file: Path
