@@ -77,38 +77,9 @@ Verify by re-running the repo's tests and re-indexing (`auto` detects the tool):
 uv run refract verify path/to/repo --db out.db --test-command auto
 ```
 
-Compare refract against agentic CLIs (Codex, opencode, Gemini) on the same repo
-and smell. Pick competitors with `--tools` (comma-separated); refract is always
-the baseline. A counting HTTP proxy tallies each tool's API calls and tokens:
-
-```sh
-# default: refract vs codex
-uv run refract benchmark path/to/repo --smell long_method
-
-# refract vs opencode and codex, on the same OpenAI key
-uv run refract benchmark path/to/repo --smell long_method --tools codex,opencode
-```
-
-opencode routes through the proxy with `OPENAI_API_KEY`. gemini talks to Google,
-so it uses `GEMINI_API_KEY` and its own `--gemini-model` (default
-`gemini-2.5-flash`).
-
-Every tool's after-state is also test-verified (not just re-indexed): each
-`ToolResult` reports `tests_passed` from actually running the repo's test
-suite before vs. after, alongside the smell/complexity/syntax deltas. `--test-command`
-overrides auto-detection (same syntax as `refract verify --test-command`) for
-repos that need one — e.g. a multi-module Maven project where the generic
-`mvn test` also builds unrelated submodules.
-
-By default refract's own baseline runs on OpenAI. `--refract-provider gemini`
-switches it to Gemini instead, interpreting `--model`/`GEMINI_API_KEY` as the
-Gemini model/key so the whole run can go through a single Gemini key:
-
-```sh
-# refract (gemini) vs gemini-cli, same model, one key
-uv run refract benchmark path/to/repo --smell long_method --tools gemini \
-  --refract-provider gemini --model gemini-2.5-flash --gemini-model gemini-2.5-flash
-```
+The evaluation harness used for the thesis (benchmarking refract against
+agentic CLIs, the counting proxy, and the DesigniteJava/DPy oracles) lives on
+the [`benchmark`](../../tree/benchmark) branch, not on `main`.
 
 ## How it works
 

@@ -4,7 +4,6 @@ import argparse
 import os
 import shutil
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
 
 from refract.core.config import load_dotenv
@@ -78,75 +77,6 @@ def _build_parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--smell", choices=_SMELL_CHOICES, required=True)
     check_parser.set_defaults(func=_cmd_check)
 
-    bench_parser = subparsers.add_parser(
-        "benchmark", help="Compare refract vs agentic CLIs (codex, opencode, gemini)"
-    )
-    bench_parser.add_argument("repo", type=Path)
-    bench_parser.add_argument("--smell", choices=_SMELL_CHOICES, required=True)
-    bench_parser.add_argument("--model", default="gpt-4o-mini")
-    bench_parser.add_argument("--limit", type=int, default=10)
-    bench_parser.add_argument("--verbose", action="store_true")
-    bench_parser.add_argument(
-        "--tools",
-        default="codex",
-        help="Comma-separated agentic tools to run against refract "
-        "(codex, opencode, gemini). Default: codex.",
-    )
-    bench_parser.add_argument(
-        "--gemini-model",
-        default="gemini-2.5-flash",
-        help="Model for the gemini tool (Gemini talks to Google, not OpenAI).",
-    )
-    bench_parser.add_argument(
-        "--codex-api-key-mode",
-        action="store_true",
-        help="Route codex through the counting proxy using OPENAI_API_KEY "
-        "(requires a verified OpenAI organization).",
-    )
-    bench_parser.add_argument(
-        "--refract-provider",
-        choices=["openai", "gemini"],
-        default="openai",
-        help="Provider backing refract's own baseline run. 'gemini' interprets "
-        "--model/the provider key as Gemini instead of OpenAI, so the whole "
-        "run can go through a single Gemini key (see "
-        "references/README.md for the full same-model setup "
-        "across all four tools). Default: openai.",
-    )
-    bench_parser.add_argument(
-        "--test-command",
-        default="auto",
-        help="Override how each tool's after-state is test-verified, same syntax "
-        "as `refract verify --test-command`. 'auto' (default) detects "
-        "mvn/gradle/pytest; pass an explicit command for repos that need one "
-        "(e.g. a multi-module Maven project where the generic `mvn test` also "
-        "builds unrelated submodules).",
-    )
-    bench_parser.add_argument(
-        "--keep-workdir",
-        type=Path,
-        default=None,
-        help="Directory to persist each tool's patched repo copy + per-method "
-        "metrics under (refract_copy/, <tool>_copy/, <tool>_metrics.json). "
-        "Defaults to an auto-generated dir under ./refract-workdir/ so the edits "
-        "are auditable by default; pass a path to choose the location, or "
-        "--ephemeral to skip keeping them.",
-    )
-    bench_parser.add_argument(
-        "--ephemeral",
-        action="store_true",
-        help="Run in a self-deleting temp dir instead of keeping the patched "
-        "repos (the pre-default behavior). Overrides --keep-workdir.",
-    )
-    bench_parser.add_argument(
-        "--refract-max-attempts",
-        type=int,
-        default=3,
-        help="Inference calls refract may spend per target: the first proposal "
-        "plus feedback-driven retries when an edit is rejected. 1 disables retries "
-        "(single-shot arm). Default: 3.",
-    )
-    bench_parser.set_defaults(func=_cmd_benchmark)
 
     return parser
 
@@ -246,8 +176,8 @@ def _cmd_doctor(_: argparse.Namespace) -> None:
 def _cmd_check(args: argparse.Namespace) -> None:
     """Fresh re-index + count for one smell type. Exits 1 while any remain.
 
-    This is the ground-truth oracle the benchmark hands to the agentic tools:
-    they run it in their own loop and iterate until it reports 0.
+    Exit code makes it usable as a gate: run it in a loop and iterate until
+    it reports 0.
     """
     repo = args.repo.resolve()
     index = index_repository(repo)
@@ -263,67 +193,6 @@ def _cmd_check(args: argparse.Namespace) -> None:
 
     if smells:
         raise SystemExit(1)
-
-
-def _resolve_workdir(args: argparse.Namespace) -> Path | None:
-    """Where to keep each tool's patched repo copy. None means a self-deleting
-    temp dir. Default is a per-run persistent dir so a dev-loop run is auditable
-    without having to pass a flag; --ephemeral opts out; --keep-workdir overrides
-    the location."""
-    if args.ephemeral:
-        return None
-    if args.keep_workdir:
-        return args.keep_workdir.resolve()
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    return (Path.cwd() / "refract-workdir" / f"{args.repo.name}__{args.smell}__{stamp}").resolve()
-
-
-def _cmd_benchmark(args: argparse.Namespace) -> None:
-    # refract's own baseline run needs whichever key matches --refract-provider;
-    # OpenAI stays the default so existing invocations behave unchanged.
-    baseline_key_env = "GEMINI_API_KEY" if args.refract_provider == "gemini" else "OPENAI_API_KEY"
-    api_key = os.getenv(baseline_key_env)
-    if not api_key:
-        raise SystemExit(f"{baseline_key_env} is not set.")
-
-    # imported lazily so the CLI loads without the benchmark dependencies
-    from refract.benchmark.report import print_report
-    from refract.benchmark.runner import AGENTIC_TOOLS, run_benchmark
-
-    tools = [t.strip() for t in args.tools.split(",") if t.strip()]
-    unknown = [t for t in tools if t not in AGENTIC_TOOLS]
-    if unknown:
-        raise SystemExit(
-            f"Unknown --tools value(s): {', '.join(unknown)}. Choose from {', '.join(AGENTIC_TOOLS)}."
-        )
-
-    # Keep the patched repos by default (auditable dev loop); --ephemeral opts
-    # into a self-deleting temp dir. An explicit --keep-workdir picks the location.
-    workdir = _resolve_workdir(args)
-
-    print(
-        f"Benchmarking refract ({args.refract_provider}) vs {', '.join(tools)} on {args.repo} "
-        f"({args.smell}, model={args.model})"
-    )
-    results = run_benchmark(
-        repo=args.repo.resolve(),
-        smell_type=SmellType(args.smell),
-        model=args.model,
-        api_key=api_key,
-        limit=args.limit,
-        tools=tools,
-        codex_api_key_mode=args.codex_api_key_mode,
-        gemini_model=args.gemini_model,
-        gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
-        refract_provider=args.refract_provider,
-        test_command=args.test_command,
-        verbose=args.verbose,
-        workdir=workdir,
-        refract_max_attempts=args.refract_max_attempts,
-    )
-    print_report(results)
-    if workdir:
-        print(f"\nPatched repos + per-method metrics kept under {workdir}")
 
 
 def _print_smells(index: RepositoryIndex) -> None:

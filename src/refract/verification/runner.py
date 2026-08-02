@@ -121,8 +121,8 @@ def verify(repo_root: Path, test_command: str = "auto") -> VerificationResult:
 def _test_env(repo_root: Path) -> dict[str, str]:
     """Force the repo copy's own source onto PYTHONPATH ahead of everything else.
 
-    The benchmark copies each repo with ``copytree``, but a uv venv is not
-    relocatable: the copy's console scripts keep an absolute shebang to the
+    A copied repo (``copytree``) breaks a uv venv, which is not relocatable:
+    the copy's console scripts keep an absolute shebang to the
     original venv's python, whose editable-install .pth injects the original source
     into sys.path -- so the test-gate would pass no matter what the tool edited.
     PYTHONPATH precedes site-packages .pth additions, so prepending the copy's roots
