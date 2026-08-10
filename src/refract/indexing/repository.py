@@ -28,12 +28,28 @@ _EXCLUDE = re.compile(
             # click long_identifier regression, refract-run3-behavior-failures).
             r"/test",
             r"/conftest\.py$",  # pytest config file -- doesn't start with "test"
+            # JS/TS colocate their tests next to the source as
+            # users.service.spec.ts / users.service.test.ts, so no path component
+            # ever starts with "test" and the rule above misses them entirely.
+            # Also covers jest/vitest setup files and __tests__/ directories.
+            r"\.(?:spec|test)\.[cm]?[jt]sx?$",
+            r"/__tests__/",
+            r"/(?:jest|vitest)\.(?:config|setup)\.[cm]?[jt]s$",
             r"/src/it/",
             r"/xdocs-examples/",
             r"/resources/",
             r"noncompilable",
             r"/module-info\.java$",
             r"/(?:\.venv|venv|site-packages|node_modules|__pycache__)/",
+            # Compiled JS output. Without this, refract indexes a repo's own
+            # transpiled sources -- refactoring a dist/ file is doubly pointless:
+            # the next build overwrites it, and the smell is still in the .ts it
+            # came from. `build/` and `out/` are deliberately NOT listed, since
+            # they'd also drop hand-written Java under Gradle's build dir.
+            r"/dist/",
+            r"/coverage/",
+            r"\.d\.ts$",  # type declarations: no executable code to refactor
+            r"\.(?:min|bundle)\.[cm]?js$",
             r"/\.[^/]+/",  # hidden dirs
         )
     )

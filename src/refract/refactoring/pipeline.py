@@ -39,9 +39,13 @@ def run_refactor(
     apply: bool,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     verify_after: Callable[[], bool] | None = None,
+    only_file: Path | None = None,
 ) -> list[RefactorResult]:
     """Refactor up to ``limit`` smells of ``smell_type``, each via a stateless
     model call spliced in through the decline-only patcher guards.
+
+    ``only_file`` narrows the run to smells in that one file; it is resolved
+    against ``repo_root`` so a relative path works from anywhere.
 
     ``verify_after`` is the optional behavioural test-gate: a callable returning
     True iff the repo's suite still passes. When given (and ``apply``), an edit
@@ -49,8 +53,18 @@ def run_refactor(
     catches a valid-but-behaviour-changing edit. Opt-in, and only meaningful
     against a baseline that already passes.
     """
+    candidates = index.smells_by_type(smell_type)
+    if only_file is not None:
+        target = only_file if only_file.is_absolute() else repo_root / only_file
+        target = target.resolve()
+        candidates = [
+            s
+            for s in candidates
+            if (s.file if s.file.is_absolute() else repo_root / s.file).resolve() == target
+        ]
+
     smells = sorted(
-        index.smells_by_type(smell_type),
+        candidates,
         key=lambda s: (str(s.file), s.line, s.identifier),
     )[: max(limit, 0)]
 

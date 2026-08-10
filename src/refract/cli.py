@@ -48,6 +48,11 @@ def _build_parser() -> argparse.ArgumentParser:
     refactor_parser.add_argument("--smell", choices=_SMELL_CHOICES, required=True)
     refactor_parser.add_argument("--limit", type=int, default=10)
     refactor_parser.add_argument(
+        "--file",
+        type=Path,
+        help="Refactor only smells in this file (relative to REPO or absolute).",
+    )
+    refactor_parser.add_argument(
         "--max-attempts",
         type=int,
         default=3,
@@ -91,6 +96,11 @@ def _cmd_index(args: argparse.Namespace) -> None:
 
 def _cmd_refactor(args: argparse.Namespace) -> None:
     repo = args.repo.resolve()
+    if args.file is not None:
+        target = args.file if args.file.is_absolute() else repo / args.file
+        if not target.is_file():
+            raise SystemExit(f"No such file: {target}")
+
     if args.apply and not args.allow_dirty:
         _require_clean_worktree(repo)
 
@@ -109,6 +119,7 @@ def _cmd_refactor(args: argparse.Namespace) -> None:
         provider=provider,
         apply=args.apply,
         max_attempts=args.max_attempts,
+        only_file=args.file,
     )
 
     mode = "applied" if args.apply else "planned"
@@ -159,7 +170,7 @@ def _cmd_doctor(_: argparse.Namespace) -> None:
         print(f"- {spec.name}: {', '.join(spec.extensions)}")
 
     print("\nBuild/test tools:")
-    for tool in ("mvn", "gradle", "pytest", "git"):
+    for tool in ("mvn", "gradle", "pytest", "npm", "pnpm", "yarn", "git"):
         print(f"- {tool}: {shutil.which(tool) or 'missing'}")
 
     print("\nProviders:")
