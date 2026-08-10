@@ -135,3 +135,111 @@ def test_ancestor_dir_named_test_does_not_exclude_repo(tmp_path: Path) -> None:
     indexed = {m.file for m in index_repository(repo).methods}
 
     assert (repo / "src/app.py").resolve() in indexed
+
+
+TYPESCRIPT_SOURCE = """\
+import { Injectable } from '@nestjs/common';
+
+const MAX_RETRIES = 3;
+
+@Injectable()
+export class UsersService {
+  private readonly DEFAULT_TIMEOUT_MS = 5000;
+
+  constructor(private readonly repo: Repo) {}
+
+  async findOne(id: number, opts?: FindOptions): Promise<User | null> {
+    const runningAccumulatedOrderTotal = 42;
+    if (id > 99) {
+      return null;
+    }
+    for (const key of Object.keys(opts ?? {})) {
+      this.repo.evict(key);
+    }
+    return this.repo.find(id, runningAccumulatedOrderTotal);
+  }
+}
+
+export const buildHandler = (retries: number) => {
+  return retries * 750;
+};
+"""
+
+JAVASCRIPT_SOURCE = """\
+'use strict';
+const RETRY_LIMIT = 5;
+
+class Widget {
+  render(depth = 3, ...rest) {
+    if (depth > 8 && rest.length) {
+      return null;
+    }
+    return rest.map((r) => r * 7);
+  }
+}
+"""
+
+
+def test_typescript_detects_all_three_smell_inputs(tmp_path: Path) -> None:
+    path = _write(tmp_path, "users.service.ts", TYPESCRIPT_SOURCE)
+    assert _spec(path).name == "typescript"
+
+    smells = detect_smells(path, _spec(path))
+
+    # MAX_RETRIES (const) and DEFAULT_TIMEOUT_MS (readonly field) are already
+    # named constants, so their literals are waived; 99/42/750 are not.
+    assert _magic_values(smells) == {"42", "99", "750"}
+
+    long_ids = {s.identifier for s in smells if s.smell == SmellType.LONG_IDENTIFIER}
+    assert "runningAccumulatedOrderTotal" in long_ids
+    assert "DEFAULT_TIMEOUT_MS" in long_ids  # 18 chars, over the 17 threshold
+
+
+def test_typescript_method_extraction_covers_classes_and_arrows(tmp_path: Path) -> None:
+    path = _write(tmp_path, "users.service.ts", TYPESCRIPT_SOURCE)
+
+    methods = {m.name: m for m in extract_methods(path, _spec(path))}
+
+    find_one = methods["findOne"]
+    assert find_one.class_name == "UsersService"
+    assert find_one.parameters == ["id", "opts"]
+    assert "find" in find_one.calls
+    # 1 + if + for-of + ?? -- the nullish coalescing branches like && / ||
+    assert find_one.cyclomatic_complexity == 4
+    # a `const x = () => {}` is a function even though the name is on the binding
+    assert "buildHandler" in methods
+
+
+def test_javascript_and_tsx_use_their_own_grammars(tmp_path: Path) -> None:
+    js = _write(tmp_path, "widget.js", JAVASCRIPT_SOURCE)
+    assert _spec(js).name == "javascript"
+
+    render = next(m for m in extract_methods(js, _spec(js)) if m.name == "render")
+    assert render.class_name == "Widget"
+    assert _magic_values(detect_smells(js, _spec(js))) == {"3", "8", "7"}
+
+    # JSX would be a parse error under the plain TypeScript grammar
+    tsx = _write(tmp_path, "App.tsx", "export const App = () => {\n  return <div>{9}</div>;\n};\n")
+    assert _spec(tsx).name == "tsx"
+    assert _magic_values(detect_smells(tsx, _spec(tsx))) == {"9"}
+
+
+def test_colocated_js_test_files_are_excluded(tmp_path: Path) -> None:
+    # JS/TS put tests beside the source, so no path component starts with "test"
+    # and the directory-based rule alone would happily refactor them.
+    _write_nested(tmp_path, "src/users/users.service.ts", TYPESCRIPT_SOURCE)
+    _write_nested(tmp_path, "src/users/users.service.spec.ts", TYPESCRIPT_SOURCE)
+    _write_nested(tmp_path, "src/users/__tests__/users.ts", TYPESCRIPT_SOURCE)
+    _write_nested(tmp_path, "dist/users.service.js", JAVASCRIPT_SOURCE)
+    _write_nested(tmp_path, "src/types.d.ts", "export declare const x: number;\n")
+
+    indexed = {m.file for m in index_repository(tmp_path).methods}
+
+    assert (tmp_path / "src/users/users.service.ts").resolve() in indexed
+    for excluded in (
+        "src/users/users.service.spec.ts",
+        "src/users/__tests__/users.ts",
+        "dist/users.service.js",
+        "src/types.d.ts",
+    ):
+        assert (tmp_path / excluded).resolve() not in indexed, excluded
