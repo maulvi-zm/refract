@@ -68,6 +68,20 @@ Apply it (requires a clean git working tree in the target repo unless
 uv run refract refactor path/to/repo --db out.db --smell magic_number --apply
 ```
 
+Scope a run to one file with `--file`, so only smells detected in that file are
+refactored:
+
+```sh
+uv run refract refactor path/to/repo --db out.db --smell magic_number --file src/main/java/com/demo/CartService.java --dry-run
+```
+
+The path may be absolute or relative to the repo root (not to your shell's
+working directory), and must point at an existing file — refract exits with
+`No such file: ...` otherwise. Filtering happens before `--limit`, so
+`--file X --limit 3` means the first three smells *in X*. The file still has to
+be indexed: `--file` narrows what gets refactored, it does not index anything
+new, so run `refract index` first.
+
 Select the provider/model per command with `--provider`/`--model`, or set
 `REFRACT_PROVIDER`/`REFRACT_MODEL` for the session.
 
